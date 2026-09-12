@@ -7,21 +7,24 @@ import {
 } from '@rniverse/utils/request';
 import type { Result } from '@rniverse/utils/result';
 import type {
+	Consumer,
 	ConsumerConfig,
 	ConsumerGroupJoinEvent,
-	ConsumerRunConfig,
-	EachMessagePayload,
 	Producer,
 	ProducerConfig,
 } from 'kafkajs';
 
 // Generalizes the connection-lifecycle state machine (status + health
 // aggregator + init/close), the per-service HTTP client map, and Kafka
-// producer/consumer registration — all were hand-rolled identically per
-// repo, only the connector/service list ever differed. `required` on a
+// producer/consumer setup — all were hand-rolled identically per repo, only
+// the connector/service/topic list ever differed. `required` on a
 // ConnectionConfiguration drives both phases: a required connector failing
 // to connect is fatal; an optional one is best-effort (logged, doesn't
 // take init() down) at both connect and health-check time.
+//
+// Every accessor (`connections()`, `http()`, `kafka()`) is a getter, not a
+// plain property — matches the `pg()`/`mail()` convention every consumer
+// already uses for shared instances.
 
 export const CONNECTION_STATUS = {
 	IDLE: 'idle',
@@ -48,7 +51,7 @@ export type ConnectionConfiguration = {
 	required: boolean;
 };
 
-export type HttpServiceConfiguration = ClientConfig & { name: string };
+export type HttpConfiguration = ClientConfig & { name: string };
 
 export type HealthReport = {
 	ok: boolean;
@@ -92,8 +95,7 @@ function createConnections(configurations: ConnectionConfiguration[]) {
 		return { ok, isInWorkingState, services };
 	};
 
-	const init = async (): Promise<HealthReport> => {
-		state = CONNECTION_STATUS.INITIALIZING;
+	const connect = async (): Promise<void> => {
 		const required = configurations.filter((c) => c.required);
 		const optional = configurations.filter((c) => !c.required);
 
@@ -116,10 +118,6 @@ function createConnections(configurations: ConnectionConfiguration[]) {
 				}),
 			),
 		);
-
-		const report = await health();
-		state = CONNECTION_STATUS.READY;
-		return report;
 	};
 
 	const close = async (): Promise<void> => {
@@ -134,13 +132,21 @@ function createConnections(configurations: ConnectionConfiguration[]) {
 		state = CONNECTION_STATUS.CLOSED;
 	};
 
-	return { init, close, health, status: () => state };
+	return {
+		state: () => state,
+		setState: (next: ConnectionStatus) => {
+			state = next;
+		},
+		connect,
+		close,
+		health,
+	};
 }
 
-function createServices(
-	configurations: HttpServiceConfiguration[],
-): Record<string, HttpClient> {
-	return Object.fromEntries(
+function createHttp(
+	configurations: HttpConfiguration[],
+): Map<string, HttpClient> {
+	return new Map(
 		configurations.map(({ name, ...clientConfig }) => [
 			name,
 			http(clientConfig),
@@ -153,72 +159,110 @@ export type KafkaConsumerConfig = ConsumerConfig & {
 	fromBeginning?: boolean;
 };
 
-/**
- * Registration, not raw passthrough — `connector.getProducer()`/
- * `getConsumer()` already take their own real kafkajs config, so this adds
- * only what's actually shared logic: a best-effort producer (null, not a
- * crash, if Kafka is down at startup — caller decides the fallback) and a
- * consumer subscribe with group-join visibility, both stashed under one
- * registry instead of hand-rolled at each call site.
- */
-function createKafka(connector: RedpandaConnector) {
-	const producers: Record<string, Producer | null> = {};
+export type KafkaProducerConfiguration = {
+	name: string;
+	config?: Partial<ProducerConfig>;
+};
 
-	async function registerProducer(
-		name: string,
-		config?: Partial<ProducerConfig>,
-	): Promise<Producer | null> {
+export type KafkaConsumerConfiguration = {
+	name: string;
+	consumer: KafkaConsumerConfig;
+};
+
+/**
+ * Declarative — list what producers/consumers this app needs, `init()`
+ * connects/subscribes all of them. Subscribing is as far as this goes:
+ * `.run({eachMessage})` needs the caller's own message handler (domain
+ * logic, e.g. it needs the caller's DB tables), so it's left to whoever
+ * looks the consumer up by name afterward — see the `consumers/` directory
+ * convention in each repo's own src.
+ */
+function createKafka(config: {
+	connector: RedpandaConnector;
+	producers?: KafkaProducerConfiguration[];
+	consumers?: KafkaConsumerConfiguration[];
+}) {
+	const producers = new Map<string, Producer | null>();
+	const consumers = new Map<string, Consumer>();
+
+	async function connectProducer(
+		entry: KafkaProducerConfiguration,
+	): Promise<void> {
 		let producer: Producer | null = null;
 		try {
-			producer = await connector.getProducer(config);
+			producer = await config.connector.getProducer(entry.config);
 		} catch (err) {
-			log.error(err, `Kafka producer '${name}' unavailable at startup`);
+			log.error(err, `Kafka producer '${entry.name}' unavailable at startup`);
 		}
-		producers[name] = producer;
-		return producer;
+		producers.set(entry.name, producer);
 	}
 
-	async function registerConsumer(
-		config: KafkaConsumerConfig,
-		onMessage: (payload: EachMessagePayload) => Promise<void>,
-		runConfig?: Omit<ConsumerRunConfig, 'eachMessage'>,
+	async function subscribeConsumer(
+		entry: KafkaConsumerConfiguration,
 	): Promise<void> {
-		const { topic, fromBeginning, ...consumerConfig } = config;
-		const consumer = await connector.getConsumer(consumerConfig);
+		const { topic, fromBeginning, ...consumerConfig } = entry.consumer;
+		const consumer = await config.connector.getConsumer(consumerConfig);
 		await consumer.subscribe({ topic, fromBeginning: fromBeginning ?? false });
-		log.info({ topic, groupId: config.groupId }, 'kafka.consumer: subscribed');
-		// `subscribe`/`run` resolving doesn't mean the group finished joining —
-		// that handshake runs against the broker in the background and can take
-		// a few seconds. Logged so "hadn't joined yet" is visible, not guessed.
+		log.info(
+			{ topic, groupId: entry.consumer.groupId },
+			`kafka.consumer '${entry.name}': subscribed`,
+		);
+		// `subscribe` resolving doesn't mean the group finished joining — that
+		// handshake runs against the broker in the background and can take a
+		// few seconds. Logged so "hadn't joined yet" is visible, not guessed.
 		consumer.on(
 			consumer.events.GROUP_JOIN,
 			({ payload }: ConsumerGroupJoinEvent) => {
 				log.info(
-					{ groupId: config.groupId, memberId: payload.memberId },
-					'kafka.consumer: group joined — ready to receive',
+					{ groupId: entry.consumer.groupId, memberId: payload.memberId },
+					`kafka.consumer '${entry.name}': group joined — ready to receive`,
 				);
 			},
 		);
-		await consumer.run({ ...runConfig, eachMessage: onMessage });
+		consumers.set(entry.name, consumer);
 	}
 
-	return {
-		register: { producer: registerProducer, consumer: registerConsumer },
-		registry: { producers },
-	};
+	async function connect(): Promise<void> {
+		await Promise.all((config.producers ?? []).map(connectProducer));
+		await Promise.all((config.consumers ?? []).map(subscribeConsumer));
+	}
+
+	return { connect, producers, consumers };
 }
 
 export function createRegistry(config: {
 	connections?: ConnectionConfiguration[];
-	services?: HttpServiceConfiguration[];
+	http?: HttpConfiguration[];
 	/** Pass the same connector instance also listed in `connections` — kafka
 	 * needs the concrete RedpandaConnector (getProducer/getConsumer), not the
 	 * generic connect/close/health shape `connections` tracks it under. */
-	kafka?: { connector: RedpandaConnector };
+	kafka?: {
+		connector: RedpandaConnector;
+		producers?: KafkaProducerConfiguration[];
+		consumers?: KafkaConsumerConfiguration[];
+	};
 }) {
+	const connections = createConnections(config.connections ?? []);
+	const httpClients = createHttp(config.http ?? []);
+	const kafka = config.kafka ? createKafka(config.kafka) : undefined;
+
+	const init = async (): Promise<HealthReport> => {
+		connections.setState(CONNECTION_STATUS.INITIALIZING);
+		await connections.connect();
+		if (kafka) await kafka.connect();
+		const report = await connections.health();
+		connections.setState(CONNECTION_STATUS.READY);
+		return report;
+	};
+
 	return {
-		connections: createConnections(config.connections ?? []),
-		services: createServices(config.services ?? []),
-		kafka: config.kafka ? createKafka(config.kafka.connector) : undefined,
+		connections: () => ({
+			init,
+			close: connections.close,
+			health: connections.health,
+			status: connections.state,
+		}),
+		http: () => httpClients,
+		kafka: () => kafka,
 	};
 }
