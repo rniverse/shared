@@ -1,9 +1,12 @@
 import type { RedpandaConnector } from '@rniverse/connectors/redpanda';
 import { log } from '@rniverse/utils';
 import type {
+	ConsumerConfig,
 	ConsumerGroupJoinEvent,
+	ConsumerRunConfig,
 	EachMessagePayload,
 	Producer,
+	ProducerConfig,
 } from 'kafkajs';
 
 // Generalizes the two Kafka-specific concerns every consumer of Redpanda
@@ -12,13 +15,23 @@ import type {
 // with group-join visibility. Message parsing/validation/rejection is
 // domain-specific (it needs the caller's own DB tables) and stays with
 // the caller — passed in as `onMessage`.
+//
+// Every kafkajs config type is forwarded through as-is, not narrowed to
+// the couple of fields notify happens to use today — a wrapper that's
+// less configurable than the connector it wraps defeats the point of
+// sharing it: the next repo with different needs (a partitioner, a
+// session timeout, eachBatch instead of eachMessage) would have nowhere
+// to put that.
 
-export function createKafkaProducer(connector: RedpandaConnector) {
+export function createKafkaProducer(
+	connector: RedpandaConnector,
+	config?: Partial<ProducerConfig>,
+) {
 	let producer: Producer | null = null;
 
 	async function connect(): Promise<void> {
 		try {
-			producer = await connector.getProducer();
+			producer = await connector.getProducer(config);
 		} catch (err) {
 			log.error(err, 'Kafka producer unavailable at startup');
 		}
@@ -31,8 +44,7 @@ export function createKafkaProducer(connector: RedpandaConnector) {
 	};
 }
 
-export type KafkaConsumerConfig = {
-	groupId: string;
+export type KafkaConsumerConfig = ConsumerConfig & {
 	topic: string;
 	fromBeginning?: boolean;
 };
@@ -43,16 +55,12 @@ export function createKafkaConsumer(
 ) {
 	async function subscribe(
 		onMessage: (payload: EachMessagePayload) => Promise<void>,
+		runConfig?: Omit<ConsumerRunConfig, 'eachMessage'>,
 	): Promise<void> {
-		const consumer = await connector.getConsumer({ groupId: config.groupId });
-		await consumer.subscribe({
-			topic: config.topic,
-			fromBeginning: config.fromBeginning ?? false,
-		});
-		log.info(
-			{ topic: config.topic, groupId: config.groupId },
-			'kafka.consumer: subscribed',
-		);
+		const { topic, fromBeginning, ...consumerConfig } = config;
+		const consumer = await connector.getConsumer(consumerConfig);
+		await consumer.subscribe({ topic, fromBeginning: fromBeginning ?? false });
+		log.info({ topic, groupId: config.groupId }, 'kafka.consumer: subscribed');
 		// `subscribe`/`run` resolving doesn't mean the group finished joining —
 		// that handshake runs against the broker in the background and can take
 		// a few seconds. Logged so "hadn't joined yet" is visible, not guessed.
@@ -65,7 +73,7 @@ export function createKafkaConsumer(
 				);
 			},
 		);
-		await consumer.run({ eachMessage: onMessage });
+		await consumer.run({ ...runConfig, eachMessage: onMessage });
 	}
 
 	return { subscribe };
