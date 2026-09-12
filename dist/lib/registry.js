@@ -99,31 +99,32 @@ function createKafka(config) {
     const producers = new Map();
     const consumers = new Map();
     async function connectProducer(entry) {
+        const { name, ...producerConfig } = entry;
         let producer = null;
         try {
-            producer = await config.connector.getProducer(entry.config);
+            producer = await config.connector.getProducer(producerConfig);
         }
         catch (err) {
-            log.error(err, `Kafka producer '${entry.name}' unavailable at startup`);
+            log.error(err, `Kafka producer '${name}' unavailable at startup`);
         }
-        producers.set(entry.name, producer);
+        producers.set(name, producer);
     }
     async function subscribeConsumer(entry) {
-        const { topic, fromBeginning, ...consumerConfig } = entry.consumer;
+        const { name, topic, fromBeginning, ...consumerConfig } = entry;
         const consumer = await config.connector.getConsumer(consumerConfig);
         await consumer.subscribe({ topic, fromBeginning: fromBeginning ?? false });
-        log.info({ topic, groupId: entry.consumer.groupId }, `kafka.consumer '${entry.name}': subscribed`);
+        log.info({ topic, groupId: entry.groupId }, `kafka.consumer '${name}': subscribed`);
         // `subscribe` resolving doesn't mean the group finished joining — that
         // handshake runs against the broker in the background and can take a
         // few seconds. Logged so "hadn't joined yet" is visible, not guessed.
         consumer.on(consumer.events.GROUP_JOIN, ({ payload }) => {
-            log.info({ groupId: entry.consumer.groupId, memberId: payload.memberId }, `kafka.consumer '${entry.name}': group joined — ready to receive`);
+            log.info({ groupId: entry.groupId, memberId: payload.memberId }, `kafka.consumer '${name}': group joined — ready to receive`);
         });
-        consumers.set(entry.name, consumer);
+        consumers.set(name, consumer);
     }
     async function connect() {
-        await Promise.all((config.producers ?? []).map(connectProducer));
-        await Promise.all((config.consumers ?? []).map(subscribeConsumer));
+        await Promise.all(Object.values(config.producers ?? {}).map(connectProducer));
+        await Promise.all(Object.values(config.consumers ?? {}).map(subscribeConsumer));
     }
     return { connect, producers, consumers };
 }

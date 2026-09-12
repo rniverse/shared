@@ -36,13 +36,18 @@ export type KafkaConsumerConfig = ConsumerConfig & {
     topic: string;
     fromBeginning?: boolean;
 };
-export type KafkaProducerConfiguration = {
+/**
+ * `name` is the actual registry key (what `producers.get()`/`.run()` look
+ * up) — deliberately not the object key the caller declares this under.
+ * Decouples the stable, typo-checked TS property (`config.kafka.producers.
+ * notifier`) from the runtime label (env-driven, shows up in log lines,
+ * can differ per deployment without a code change).
+ */
+export type KafkaProducerConfiguration = Partial<ProducerConfig> & {
     name: string;
-    config?: Partial<ProducerConfig>;
 };
-export type KafkaConsumerConfiguration = {
+export type KafkaConsumerConfiguration = KafkaConsumerConfig & {
     name: string;
-    consumer: KafkaConsumerConfig;
 };
 export declare function createRegistry(config: {
     connections?: ConnectionConfiguration[];
@@ -52,8 +57,8 @@ export declare function createRegistry(config: {
      * generic connect/close/health shape `connections` tracks it under. */
     kafka?: {
         connector: RedpandaConnector;
-        producers?: KafkaProducerConfiguration[];
-        consumers?: KafkaConsumerConfiguration[];
+        producers?: Record<string, KafkaProducerConfiguration>;
+        consumers?: Record<string, KafkaConsumerConfiguration>;
     };
 }): {
     connections: () => {
