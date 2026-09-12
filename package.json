@@ -20,10 +20,6 @@
 			"types": "./dist/lib/registry.d.ts",
 			"default": "./dist/lib/registry.js"
 		},
-		"./kafka": {
-			"types": "./dist/lib/kafka.d.ts",
-			"default": "./dist/lib/kafka.js"
-		},
 		"./bootstrap": {
 			"types": "./dist/lib/bootstrap.d.ts",
 			"default": "./dist/lib/bootstrap.js"
