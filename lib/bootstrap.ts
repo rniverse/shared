@@ -22,12 +22,16 @@ export type CreateAppOptions = {
 	// types at the function boundary. The app is used structurally below
 	// (.error/.onError/.use), never for route-level type inference.
 	api: any;
-	/** The repo's own AppError class (from createErrorEnum) — checked via instanceof. */
-	AppError: new (
-		...args: any[]
-	) => { status_code: number; code: string; message: string };
-	/** Every repo's error list is required to carry these three keys. */
+	/**
+	 * One bundle, not two — `AppError` lives alongside the three required
+	 * specs because both come from the same `createErrorEnum()` call and
+	 * are always passed together. See errors.enum.ts's `BOOTSTRAP_ERRORS`.
+	 */
 	errors: {
+		/** The repo's own AppError class (from createErrorEnum) — checked via instanceof. */
+		AppError: new (
+			...args: any[]
+		) => { status_code: number; code: string; message: string };
 		NOT_FOUND: ErrorSpec;
 		VALIDATION_FAILED: ErrorSpec;
 		INTERNAL_ERROR: ErrorSpec;
@@ -35,7 +39,8 @@ export type CreateAppOptions = {
 };
 
 export function createApp(options: CreateAppOptions) {
-	const { api, AppError, errors } = options;
+	const { api, errors } = options;
+	const { AppError } = errors;
 
 	const app = new Elysia({ strictPath: true })
 		.use(logger())
