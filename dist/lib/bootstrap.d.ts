@@ -1,9 +1,5 @@
 import Elysia from 'elysia';
-type ErrorSpec = {
-    code: string;
-    message: string;
-    status: number;
-};
+import type { ErrorSpec } from './error.js';
 export type CreateAppOptions = {
     api: any;
     /** The repo's own AppError class (from createErrorEnum) — checked via instanceof. */
@@ -47,5 +43,4 @@ export declare function registerShutdown(options: RegisterShutdownOptions): {
     shutdown: (signal: string) => Promise<void>;
     unknownErrorListener: (e: Error) => Promise<void>;
 };
-export {};
 //# sourceMappingURL=bootstrap.d.ts.map

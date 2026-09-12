@@ -8,6 +8,14 @@ export function createErrorEnum(list) {
         acc[k] = k;
         return acc;
     }, {});
+    /** The `{code, message, status}` triple `createApp()`'s onError needs for one key. */
+    function spec(errorKey) {
+        return {
+            code: codes[errorKey],
+            message: messages[errorKey],
+            status: status[errorKey],
+        };
+    }
     class AppError extends Error {
         key;
         code;
@@ -23,6 +31,9 @@ export function createErrorEnum(list) {
             this.details = details;
         }
     }
-    return { key, messages, codes, status, AppError };
+    return { key, messages, codes, status, spec, AppError };
+}
+export function reasonOf(error) {
+    return error instanceof Error ? error.message : String(error);
 }
 //# sourceMappingURL=error.js.map
