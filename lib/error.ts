@@ -11,6 +11,8 @@ export type ErrorEntry = readonly [
 	status: number,
 ];
 
+export type ErrorSpec = { code: string; message: string; status: number };
+
 export function createErrorEnum<const L extends readonly ErrorEntry[]>(
 	list: L,
 ) {
@@ -35,6 +37,15 @@ export function createErrorEnum<const L extends readonly ErrorEntry[]>(
 		{} as Record<ErrorKey, ErrorKey>,
 	);
 
+	/** The `{code, message, status}` triple `createApp()`'s onError needs for one key. */
+	function spec(errorKey: ErrorKey): ErrorSpec {
+		return {
+			code: codes[errorKey],
+			message: messages[errorKey],
+			status: status[errorKey],
+		};
+	}
+
 	class AppError extends Error {
 		key: ErrorKey;
 		code: string;
@@ -52,5 +63,9 @@ export function createErrorEnum<const L extends readonly ErrorEntry[]>(
 		}
 	}
 
-	return { key, messages, codes, status, AppError };
+	return { key, messages, codes, status, spec, AppError };
+}
+
+export function reasonOf(error: unknown): string {
+	return error instanceof Error ? error.message : String(error);
 }

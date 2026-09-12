@@ -5,6 +5,7 @@ import { cxt$req } from '@rniverse/utils/context';
 import { trace$ } from '@rniverse/utils/request';
 import { toJsonSchema } from '@valibot/to-json-schema';
 import Elysia from 'elysia';
+import type { ErrorSpec } from './error';
 
 // Generalizes the Elysia app shell every service was hand-rolling
 // identically: onError envelope, openapi docs, and the per-request
@@ -13,8 +14,6 @@ import Elysia from 'elysia';
 // a caller that needs an extra step before listening (e.g. notify's
 // Kafka consumer subscribe) just sequences it between the two calls,
 // no special hook needed here.
-
-type ErrorSpec = { code: string; message: string; status: number };
 
 export type CreateAppOptions = {
 	// `any` on purpose — each repo's `createAPI()` returns an Elysia instance
