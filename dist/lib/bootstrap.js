@@ -6,7 +6,8 @@ import { trace$ } from '@rniverse/utils/request';
 import { toJsonSchema } from '@valibot/to-json-schema';
 import Elysia from 'elysia';
 export function createApp(options) {
-    const { api, AppError, errors } = options;
+    const { api, errors } = options;
+    const { AppError } = errors;
     const app = new Elysia({ strictPath: true })
         .use(logger())
         .error({ AppError })

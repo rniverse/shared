@@ -2,14 +2,18 @@ import Elysia from 'elysia';
 import type { ErrorSpec } from './error.js';
 export type CreateAppOptions = {
     api: any;
-    /** The repo's own AppError class (from createErrorEnum) — checked via instanceof. */
-    AppError: new (...args: any[]) => {
-        status_code: number;
-        code: string;
-        message: string;
-    };
-    /** Every repo's error list is required to carry these three keys. */
+    /**
+     * One bundle, not two — `AppError` lives alongside the three required
+     * specs because both come from the same `createErrorEnum()` call and
+     * are always passed together. See errors.enum.ts's `BOOTSTRAP_ERRORS`.
+     */
     errors: {
+        /** The repo's own AppError class (from createErrorEnum) — checked via instanceof. */
+        AppError: new (...args: any[]) => {
+            status_code: number;
+            code: string;
+            message: string;
+        };
         NOT_FOUND: ErrorSpec;
         VALIDATION_FAILED: ErrorSpec;
         INTERNAL_ERROR: ErrorSpec;
