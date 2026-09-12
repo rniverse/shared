@@ -159,14 +159,19 @@ export type KafkaConsumerConfig = ConsumerConfig & {
 	fromBeginning?: boolean;
 };
 
-export type KafkaProducerConfiguration = {
+/**
+ * `name` is the actual registry key (what `producers.get()`/`.run()` look
+ * up) — deliberately not the object key the caller declares this under.
+ * Decouples the stable, typo-checked TS property (`config.kafka.producers.
+ * notifier`) from the runtime label (env-driven, shows up in log lines,
+ * can differ per deployment without a code change).
+ */
+export type KafkaProducerConfiguration = Partial<ProducerConfig> & {
 	name: string;
-	config?: Partial<ProducerConfig>;
 };
 
-export type KafkaConsumerConfiguration = {
+export type KafkaConsumerConfiguration = KafkaConsumerConfig & {
 	name: string;
-	consumer: KafkaConsumerConfig;
 };
 
 /**
@@ -179,8 +184,8 @@ export type KafkaConsumerConfiguration = {
  */
 function createKafka(config: {
 	connector: RedpandaConnector;
-	producers?: KafkaProducerConfiguration[];
-	consumers?: KafkaConsumerConfiguration[];
+	producers?: Record<string, KafkaProducerConfiguration>;
+	consumers?: Record<string, KafkaConsumerConfiguration>;
 }) {
 	const producers = new Map<string, Producer | null>();
 	const consumers = new Map<string, Consumer>();
@@ -188,24 +193,25 @@ function createKafka(config: {
 	async function connectProducer(
 		entry: KafkaProducerConfiguration,
 	): Promise<void> {
+		const { name, ...producerConfig } = entry;
 		let producer: Producer | null = null;
 		try {
-			producer = await config.connector.getProducer(entry.config);
+			producer = await config.connector.getProducer(producerConfig);
 		} catch (err) {
-			log.error(err, `Kafka producer '${entry.name}' unavailable at startup`);
+			log.error(err, `Kafka producer '${name}' unavailable at startup`);
 		}
-		producers.set(entry.name, producer);
+		producers.set(name, producer);
 	}
 
 	async function subscribeConsumer(
 		entry: KafkaConsumerConfiguration,
 	): Promise<void> {
-		const { topic, fromBeginning, ...consumerConfig } = entry.consumer;
+		const { name, topic, fromBeginning, ...consumerConfig } = entry;
 		const consumer = await config.connector.getConsumer(consumerConfig);
 		await consumer.subscribe({ topic, fromBeginning: fromBeginning ?? false });
 		log.info(
-			{ topic, groupId: entry.consumer.groupId },
-			`kafka.consumer '${entry.name}': subscribed`,
+			{ topic, groupId: entry.groupId },
+			`kafka.consumer '${name}': subscribed`,
 		);
 		// `subscribe` resolving doesn't mean the group finished joining — that
 		// handshake runs against the broker in the background and can take a
@@ -214,17 +220,21 @@ function createKafka(config: {
 			consumer.events.GROUP_JOIN,
 			({ payload }: ConsumerGroupJoinEvent) => {
 				log.info(
-					{ groupId: entry.consumer.groupId, memberId: payload.memberId },
-					`kafka.consumer '${entry.name}': group joined — ready to receive`,
+					{ groupId: entry.groupId, memberId: payload.memberId },
+					`kafka.consumer '${name}': group joined — ready to receive`,
 				);
 			},
 		);
-		consumers.set(entry.name, consumer);
+		consumers.set(name, consumer);
 	}
 
 	async function connect(): Promise<void> {
-		await Promise.all((config.producers ?? []).map(connectProducer));
-		await Promise.all((config.consumers ?? []).map(subscribeConsumer));
+		await Promise.all(
+			Object.values(config.producers ?? {}).map(connectProducer),
+		);
+		await Promise.all(
+			Object.values(config.consumers ?? {}).map(subscribeConsumer),
+		);
 	}
 
 	return { connect, producers, consumers };
@@ -238,8 +248,8 @@ export function createRegistry(config: {
 	 * generic connect/close/health shape `connections` tracks it under. */
 	kafka?: {
 		connector: RedpandaConnector;
-		producers?: KafkaProducerConfiguration[];
-		consumers?: KafkaConsumerConfiguration[];
+		producers?: Record<string, KafkaProducerConfiguration>;
+		consumers?: Record<string, KafkaConsumerConfiguration>;
 	};
 }) {
 	const connections = createConnections(config.connections ?? []);
