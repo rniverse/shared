@@ -1,0 +1,21 @@
+{
+	"extends": "./tsconfig.json",
+	"compilerOptions": {
+		"noEmit": false,
+		"allowImportingTsExtensions": false,
+		"outDir": "dist",
+		"declaration": true,
+		"declarationMap": true,
+		"emitDeclarationOnly": false,
+		"module": "ESNext",
+		"target": "ES2022",
+		"moduleResolution": "Bundler",
+		"sourceMap": true,
+		"removeComments": false
+	},
+	"include": ["index.ts", "lib/**/*.ts", "middlewares/**/*.ts"],
+	"exclude": ["lib/test", "dist", "node_modules"],
+	"tsc-alias": {
+		"resolveFullPaths": true
+	}
+}

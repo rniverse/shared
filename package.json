@@ -1,0 +1,60 @@
+{
+	"name": "@rniverse/shared",
+	"version": "0.0.1",
+	"module": "index.ts",
+	"main": "dist/index.js",
+	"types": "dist/index.d.ts",
+	"files": [
+		"dist"
+	],
+	"exports": {
+		".": {
+			"types": "./dist/index.d.ts",
+			"default": "./dist/index.js"
+		},
+		"./error": {
+			"types": "./dist/lib/error.d.ts",
+			"default": "./dist/lib/error.js"
+		},
+		"./registry": {
+			"types": "./dist/lib/registry.d.ts",
+			"default": "./dist/lib/registry.js"
+		},
+		"./kafka": {
+			"types": "./dist/lib/kafka.d.ts",
+			"default": "./dist/lib/kafka.js"
+		},
+		"./bootstrap": {
+			"types": "./dist/lib/bootstrap.d.ts",
+			"default": "./dist/lib/bootstrap.js"
+		},
+		"./log.middleware": {
+			"types": "./dist/middlewares/log.middleware.d.ts",
+			"default": "./dist/middlewares/log.middleware.js"
+		},
+		"./package.json": "./package.json"
+	},
+	"scripts": {
+		"lint": "biome check --write",
+		"test": "bun test",
+		"build": "bun run tsc --project tsconfig.build.json && bun run tsc-alias --project tsconfig.build.json",
+		"biome": "biome"
+	},
+	"devDependencies": {
+		"@biomejs/biome": "^2.5.12",
+		"@types/bun": "^1.4.0",
+		"tsc-alias": "^1.9.4"
+	},
+	"peerDependencies": {
+		"@rniverse/utils": "github:rniverse/utils#dist",
+		"@rniverse/connectors": "github:rniverse/connectors#dist",
+		"@elysiajs/openapi": "^1.4.16",
+		"@valibot/to-json-schema": "^1.7.1",
+		"elysia": "^1.4.30",
+		"kafkajs": "^2.2.4",
+		"typescript": "^7.0.2"
+	},
+	"private": true,
+	"type": "module",
+	"dependencies": {}
+}
