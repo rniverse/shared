@@ -47,4 +47,18 @@ export declare function registerShutdown(options: RegisterShutdownOptions): {
     shutdown: (signal: string) => Promise<void>;
     unknownErrorListener: (e: Error) => Promise<void>;
 };
+/**
+ * The `if (import.meta.main) { ... }` body every repo had byte-identical —
+ * wire the shutdown listeners, then run `init().then(listen)` inside its own
+ * request context so early startup logs still carry a requestId. The
+ * `import.meta.main` guard itself has to stay in the caller: `import.meta`
+ * is per-module, checking it in here would only ever reflect this shared
+ * module, never the repo that called it.
+ */
+export declare function boot<App extends {
+    handle: unknown;
+}>(init: () => Promise<App>, serverConfig: {
+    port: number;
+    host: string;
+}, onShutdown: (signal: string) => Promise<void>): void;
 //# sourceMappingURL=bootstrap.d.ts.map

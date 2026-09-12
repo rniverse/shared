@@ -1,6 +1,6 @@
 import { openapi } from '@elysiajs/openapi';
 import { logger } from '../middlewares/log.middleware.js';
-import { log } from '@rniverse/utils';
+import { log, runWithContext } from '@rniverse/utils';
 import { cxt$req } from '@rniverse/utils/context';
 import { trace$ } from '@rniverse/utils/request';
 import { toJsonSchema } from '@valibot/to-json-schema';
@@ -117,5 +117,19 @@ export function registerShutdown(options) {
         process.on('SIGTERM', () => shutdown('SIGTERM'));
     }
     return { shutdown, unknownErrorListener };
+}
+/**
+ * The `if (import.meta.main) { ... }` body every repo had byte-identical —
+ * wire the shutdown listeners, then run `init().then(listen)` inside its own
+ * request context so early startup logs still carry a requestId. The
+ * `import.meta.main` guard itself has to stay in the caller: `import.meta`
+ * is per-module, checking it in here would only ever reflect this shared
+ * module, never the repo that called it.
+ */
+export function boot(init, serverConfig, onShutdown) {
+    const { unknownErrorListener } = registerShutdown({ onShutdown });
+    runWithContext(async () => init().then((app) => listen(app, serverConfig)), {
+        requestId: 'SERVER_LOG',
+    }).catch(unknownErrorListener);
 }
 //# sourceMappingURL=bootstrap.js.map
