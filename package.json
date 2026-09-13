@@ -32,7 +32,10 @@
 	},
 	"scripts": {
 		"lint": "biome check --write",
-		"test": "bun test",
+		"test": "NODE_ENV=test bun test",
+		"test:coverage": "NODE_ENV=test bun test --coverage",
+		"docker:up": "docker compose up -d --wait",
+		"docker:down": "docker compose down -v",
 		"build": "bun run tsc --project tsconfig.build.json && bun run tsc-alias --project tsconfig.build.json",
 		"biome": "biome"
 	},
