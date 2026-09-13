@@ -84,6 +84,8 @@ lib/registry.ts                — createRegistry (connections/http/kafka)
 lib/bootstrap.ts                — createApp, listen, registerShutdown, boot
 lib/error.ts                    — createErrorEnum, reasonOf
 middlewares/log.middleware.ts   — request-logging Elysia plugin
+tests/                          — this package's own test suite (§12)
+docker-compose.yml              — local Postgres/Kafka for tests/ (§12)
 ```
 
 Published as **subpath exports**, not only the barrel — every consumer
@@ -410,36 +412,74 @@ a systematic `bun.lock` comparison and fixed with `bun update
 
 ## 12. Tests
 
-**Known gap:** there are no test files in this repo (`find . -name
-'*.test.ts'` under `lib`/`middlewares` returns nothing). The `test` script
-(`bun test`) exists in `package.json` but currently has nothing to run —
-correctness has been established only via the consumers' own test suites
-(`aham`'s 112 tests, `notify`'s integration tests) exercising this
-package's code indirectly through `createRegistry`/`createApp`/
-`createErrorEnum`, plus repeated live smoke tests against the real
-Aiven-hosted Kafka broker and Resend (documented in `notify/spec.md` §18).
-Nothing in this package has a test that exercises it in isolation.
+**Resolved** — this package now has its own direct test suite under
+`tests/`, one directory per multi-file module (mirroring `lib/`), one flat
+file per single-file module:
+
+```
+tests/error.test.ts               — createErrorEnum, reasonOf (pure unit)
+tests/log.middleware.test.ts      — logger() Elysia plugin
+tests/bootstrap/create-app.test.ts     — error envelope, context wrap, openapi
+tests/bootstrap/listen.test.ts         — Bun.serve wiring (spied)
+tests/bootstrap/register-shutdown.test.ts — signal/exit paths (spied + a real subprocess)
+tests/bootstrap/boot.test.ts           — the composed import.meta.main body
+tests/registry/connections.test.ts     — connection lifecycle/health/close
+tests/registry/http.test.ts            — named HTTP client map
+tests/registry/kafka.test.ts           — producers/consumers, real broker
+```
+
+47 tests, 109+ assertions, 100% line coverage on `registry.ts`/`error.ts`,
+99%+ overall (`bun test --coverage`). The one documented gap:
+`log.middleware.ts`'s `pathOf()` catch branch (an unparsable
+`request.url`) is unreachable through a real `Request` — Bun/undici always
+hand it a valid absolute URL — so it's left uncovered rather than faked
+with a call this code can never actually receive in production.
+
+**No mocking of this package's own units.** Every test either exercises
+real code through its real entrypoint (`app.handle()` for `createApp`,
+a real Postgres via Docker for `connections`, a real Kafka broker via
+Docker for `kafka` — full publish → subscribe → group-join → consume,
+not simulated) or substitutes only the *external* boundary the design
+itself is built around — a hand-written `Connector`-shaped stub for
+connect/health branch testing (exactly the interface `registry.ts` takes
+as config, not an internal of it), `process.exit`/`Bun.serve` spies
+(can't let a test actually kill the runner or bind a real port), and one
+throwaway `bun -e` child process to prove `SIGINT` really is wired to a
+clean `process.exit(0)` without polluting the shared test process's
+global signal-listener state.
+
+**Local test infrastructure — Docker Compose, not live cloud creds.**
+`docker-compose.yml` at the repo root brings up `postgres:18-trixie`
+(host port `55432` — `5432` was already taken by an unrelated container
+on the dev machine) and `apache/kafka:4.3.1` in KRaft mode over plain
+PLAINTEXT (no SSL/SASL needed locally — `RedpandaConnector`'s `ssl`/`sasl`
+are optional, §2). This replaced an earlier `.env.test` that pointed at a
+live Aiven-hosted broker with real SASL credentials — dropped entirely
+once Compose proved sufficient, both to remove the live secret from a
+gitignored-but-still-real-credential file and to make `bun run test` not
+depend on any external service being up. `bun run docker:up` (`docker
+compose up -d --wait`) / `bun run docker:down` (`docker compose down -v`)
+wrap it; `.env.test` (git-ignored) points at the Compose services.
+`bun run test:coverage` runs the same suite under `bun test --coverage`.
 
 ## 13. Open decisions
 
-1. **Direct unit tests for this package** (§12) — not blocking today since
-   both consumers' own suites exercise it, but a bug introduced here would
-   currently only surface through `aham`'s or `notify`'s tests, not this
-   package's own.
-2. **Promotion criteria to `utils`/`connectors`** (§11) — "a third
+1. **Promotion criteria to `utils`/`connectors`** (§11) — "a third
    consumer" was floated informally as the trigger, never written down as
    a hard rule.
 
 **Built and verified** — typechecks clean in both `aham` and `notify`
-against the published `dist` branch; `createRegistry`'s Kafka path
-repeatedly smoke-tested as a real running process against the actual
-Aiven-hosted broker (publish → subscribe → group-join → consume →
-dispatch → real email sent, via `notify`); the peerDependencies fix for
-cross-package `instanceof` verified empirically both broken (under a local
-`file:` link) and fixed (after publishing for real), via a live test
-script showing `instanceof HttpError: true`; the `consumers/` directory's
-compile-time subscriber/config correspondence verified by deliberately
-breaking it and confirming a real `tsc` error, then reverting.
+against the published `dist` branch; this package's own 47-test suite
+(§12) green against real Dockerized Postgres/Kafka; `createRegistry`'s
+Kafka path additionally smoke-tested as a real running process against
+the actual Aiven-hosted broker (publish → subscribe → group-join →
+consume → dispatch → real email sent, via `notify`); the peerDependencies
+fix for cross-package `instanceof` verified empirically both broken
+(under a local `file:` link) and fixed (after publishing for real), via a
+live test script showing `instanceof HttpError: true`; the `consumers/`
+directory's compile-time subscriber/config correspondence verified by
+deliberately breaking it and confirming a real `tsc` error, then
+reverting.
 
 ---
 

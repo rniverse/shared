@@ -17,10 +17,14 @@ report.[0-9]_.[0-9]_.[0-9]_.[0-9]_.json
 
 # dotenv environment variable files
 .env
+.env.test
 .env.development.local
 .env.test.local
 .env.production.local
 .env.local
+
+# TLS certs for local test infra (Kafka SASL_SSL, etc.)
+certs/
 
 # caches
 .eslintcache
