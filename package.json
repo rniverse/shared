@@ -42,15 +42,14 @@
 	"devDependencies": {
 		"@biomejs/biome": "^2.5.12",
 		"@types/bun": "^1.4.0",
-		"tsc-alias": "^1.9.4"
+		"tsc-alias": "^1.9.4",
+		"@rniverse/connectors": "github:rniverse/connectors#dist"
 	},
 	"peerDependencies": {
 		"@rniverse/utils": "github:rniverse/utils#dist",
-		"@rniverse/connectors": "github:rniverse/connectors#dist",
 		"@elysiajs/openapi": "^1.4.16",
 		"@valibot/to-json-schema": "^1.7.1",
 		"elysia": "^1.4.30",
-		"kafkajs": "^2.2.4",
 		"typescript": "^7.0.2"
 	},
 	"private": true,

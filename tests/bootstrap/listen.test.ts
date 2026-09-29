@@ -18,6 +18,6 @@ describe('listen', () => {
 		expect(config.port).toBe(4321);
 		expect(config.hostname).toBe('localhost');
 		expect(config.fetch).toBe(handle);
-		expect(server).toBe(fakeServer);
+		expect(server as unknown).toBe(fakeServer);
 	});
 });
