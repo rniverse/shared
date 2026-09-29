@@ -38,7 +38,7 @@ export declare function createRegistry(config: {
     http?: HttpConfiguration[];
 }): {
     connections: () => {
-        init: () => Promise<HealthReport>;
+        init: () => Promise<void>;
         close: () => Promise<void>;
         health: () => Promise<HealthReport>;
         status: () => ConnectionStatus;
