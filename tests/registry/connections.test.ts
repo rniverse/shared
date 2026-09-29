@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, spyOn, test } from 'bun:test';
 import { CONNECTION_STATUS, createRegistry } from '@lib/registry';
-import { SQLConnector } from '@rniverse/connectors/sql';
+import { PostgresConnector } from '@rniverse/connectors/postgres';
 import type { Result } from '@rniverse/utils/result';
 
 // A fake `Connector` (connect/close/health) — the exact shape `registry.ts`
@@ -78,7 +78,7 @@ describe('createRegistry — connections', () => {
 		expect(report.ok).toBe(false); // sidecar unhealthy
 		expect(report.isInWorkingState).toBe(true); // but it's optional
 		expect(report.services.primary).toEqual({ ok: true });
-		expect(report.services.sidecar.ok).toBe(false);
+		expect(report.services.sidecar?.ok).toBe(false);
 		expect(registry.connections().status()).toBe(CONNECTION_STATUS.READY);
 	});
 
@@ -157,17 +157,21 @@ describe('createRegistry — connections', () => {
 });
 
 describe('createRegistry — connections, against a real Postgres', () => {
-	let postgres: SQLConnector;
+	let postgres: PostgresConnector;
 
 	beforeEach(() => {
-		postgres = new SQLConnector({ url: process.env.DATABASE_URL! });
+		postgres = new PostgresConnector({
+			name: 'postgres',
+			appName: 'shared-test',
+			url: process.env.DATABASE_URL!,
+		});
 	});
 
 	afterEach(async () => {
 		await postgres.close();
 	});
 
-	test('a real SQLConnector connects and reports healthy through the registry', async () => {
+	test('a real PostgresConnector connects and reports healthy through the registry', async () => {
 		const registry = createRegistry({
 			connections: [{ name: 'postgres', connector: postgres, required: true }],
 		});

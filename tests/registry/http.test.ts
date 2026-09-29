@@ -51,7 +51,7 @@ describe('createRegistry — http', () => {
 			headers: { 'x-service': name },
 			fetch: (async (_input: string | URL | Request, init?: RequestInit) => {
 				const headers = (init?.headers ?? {}) as Record<string, string>;
-				seen[name] = headers['x-service'];
+				seen[name] = headers['x-service'] ?? '';
 				return new Response('ok');
 			}) as typeof fetch,
 		});

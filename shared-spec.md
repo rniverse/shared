@@ -30,21 +30,22 @@ every value it needs is passed in by the caller's own `config` module.
   openapi schemas from the caller's valibot route schemas (`errorMode:
   'ignore'` — transforms have no JSON Schema equivalent, skipped silently
   rather than warning per request).
-- **Kafka:** `kafkajs` types only (`Consumer`, `Producer`,
-  `ConsumerConfig`, `ProducerConfig`, `ConsumerGroupJoinEvent`) — the
-  actual client construction is `@rniverse/connectors`' `RedpandaConnector`
-  job; `lib/registry.ts` only shapes config and holds the resulting
-  instances in a `Map`.
+- **Kafka: none — revised.** The registry used to create and subscribe
+  Kafka producers / consumers. Since the connectors rewrite, that lifecycle
+  lives in `@rniverse/connectors` (`KafkaConnector.producer()` /
+  `.consumer()` links — tracked, health-checked, closed and released with
+  their connector), and the owning service creates and runs them. `kafkajs`
+  is no longer a dependency of this package.
 - **Shared libs:** `@rniverse/utils` for `log`, `sync$seq`, `runWithContext`,
   `cxt$req`, its `request` re-export (`http()`/`HttpClient`/`ClientConfig`/
-  `trace$`), its `result` re-export (`Result`). `@rniverse/connectors` for
-  `RedpandaConnector`'s type (registry only handles the type; the instance
-  itself is constructed by and passed in from the caller).
+  `trace$`), its `result` re-export (`Result`). `@rniverse/connectors` is a
+  **devDependency only** (the registry tests use a real `PostgresConnector`);
+  `lib/` never imports it — the registry takes any `{connect, close,
+  health}` shape.
 - **Lint/format:** Biome, mirrors `aham`/`notify`'s config.
 - **Peer vs. regular dependencies — load-bearing, not a style choice:**
-  `@rniverse/utils`, `@rniverse/connectors`, `@elysiajs/openapi`,
-  `@valibot/to-json-schema`, `elysia`, `kafkajs`, and `typescript` are all
-  `peerDependencies`; `dependencies` is empty (`{}`). This is what lets
+  `@rniverse/utils`, `@elysiajs/openapi`, `@valibot/to-json-schema`,
+  `elysia`, and `typescript` are all `peerDependencies`; `dependencies` is empty (`{}`). This is what lets
   `shared`'s code resolve those imports against the *consumer's own*
   installed copy instead of a separate one nested inside
   `@rniverse/shared`, so `err instanceof HttpError` (and any other
@@ -66,12 +67,12 @@ Every export (`createRegistry`, `createApp`, `createErrorEnum`) is a
 factory function that returns fresh, independent state on each call —
 nothing in this package is a singleton or holds state at module scope.
 This was checked deliberately (not assumed) when the question came up of
-whether the design would still work with multiple Postgres DBs or multiple
-Kafka clusters in one service: it does, with zero changes to this package,
-because a caller that needs two independent Kafka clusters just calls
-`createRegistry({kafka: {...}})` twice and composes the two results itself
-(two `connect()` calls, two `producers`/`consumers` maps) — there is no
-shared registry instance for a second call to collide with. The same holds
+whether the design would still work with multiple Postgres DBs in one
+service: it does, with zero changes to this package, because a caller can
+list two connectors in one `createRegistry({connections})` call, or call
+`createRegistry()` twice and compose the results — there is no shared
+registry instance for a second call to collide with. (Multiple Kafka
+clusters are now just multiple `KafkaConnector`s in the owning service, §6.) The same holds
 for `createErrorEnum` (two independent error lists, two independent
 `AppError` classes) and for `createApp` (nothing here prevents building two
 separate Elysia app instances, though no current service does).
@@ -80,12 +81,12 @@ separate Elysia app instances, though no current service does).
 
 ```
 index.ts                      — barrel: re-exports everything below
-lib/registry.ts                — createRegistry (connections/http/kafka)
+lib/registry.ts                — createRegistry (connections/http)
 lib/bootstrap.ts                — createApp, listen, registerShutdown, boot
 lib/error.ts                    — createErrorEnum, reasonOf
 middlewares/log.middleware.ts   — request-logging Elysia plugin
 tests/                          — this package's own test suite (§12)
-docker-compose.yml              — local Postgres/Kafka for tests/ (§12)
+docker-compose.yml              — local Postgres for tests/ (§12)
 ```
 
 Published as **subpath exports**, not only the barrel — every consumer
@@ -133,20 +134,24 @@ existed, and is exactly the setup that broke `instanceof` (§2).
 As of this writing both `aham` and `notify` are pinned to the same `dist`
 commit (`cb5a503`) — confirmed via `bun.lock`, not assumed.
 
-## 5. `lib/registry.ts` — connection/HTTP/Kafka lifecycle
+## 5. `lib/registry.ts` — connection/HTTP lifecycle
 
-**Confirmed.** Generalizes three things every consumer was hand-rolling
-identically, differing only in *which* connectors/services/topics:
+**Confirmed.** Generalizes two things every consumer was hand-rolling
+identically, differing only in *which* connectors/services: the
 connection-lifecycle state machine (status + health aggregator +
-init/close), a named HTTP-client map, and Kafka producer/consumer setup.
+init/close) and a named HTTP-client map. (It used to do Kafka
+producer/consumer setup too — **removed**, see §2 and §6.)
 
 ### Connections
 
 ```ts
 type ConnectionConfiguration = { name: string; connector: Connector; required: boolean };
 ```
-`connector` is any object shaped `{connect(), close(), health()}` —
-`SQLConnector`, `RedpandaConnector`, anything future that fits the shape.
+`connector` is any object shaped `{connect(), close(), health()}` — every
+`@rniverse/connectors` connector (`PostgresConnector`, `KafkaConnector`, …)
+fits. A connectors link's `health()` and `close()` never throw (failures come
+back as a `Result`), and its `health()` is time-limited, so one hung
+dependency can't stall the aggregate report.
 `required` drives both connect and health-check behavior: a required
 connector failing at `connect()` is fatal (`process.exit(1)`); an optional
 one is best-effort — logged, doesn't take `init()` down, only its own
@@ -165,92 +170,33 @@ type HttpConfiguration = ClientConfig & { name: string };
 `http().get('notify')` (aham's pattern for its one named client to the
 `notify` service).
 
-### Kafka
-
-```ts
-type KafkaProducerConfiguration = Partial<ProducerConfig> & { name: string };
-type KafkaConsumerConfiguration = (ConsumerConfig & { topic: string; fromBeginning?: boolean }) & { name: string };
-```
-Declarative: `producers`/`consumers` are `Record<string, ...Configuration>`
-objects; `createKafka().connect()` connects every producer and
-subscribes every consumer (subscribing only — actually consuming needs
-`.run({eachMessage})`, left to the caller, see §6).
-
-**Name-decoupling (confirmed, deliberate):** each entry's `name` field is
-the *actual* registry/log key — what `producers.get()`/`consumers.get()`
-look up, and what appears in log lines. The object's own property key
-(e.g. `config.kafka.producers.notifier`) is a separate, stable,
-typo-checked TS reference, independent of the runtime `name`. This lets a
-consumer rename the runtime label (env-driven — `KAFKA_NOTIFIER_NAME`,
-defaults to `'notifier'`) per deployment without touching any call site
-that references `config.kafka.producers.notifier`. A producer failing to
-connect at startup is logged and stored as `null` in the map (not thrown)
-— matches the "optional connection" best-effort philosophy above, since a
-Kafka outage at boot shouldn't take a service down if it can still serve
-HTTP.
-
-A subscribed consumer additionally gets a `GROUP_JOIN` listener logged —
-`subscribe()` resolving doesn't mean the group finished joining, that
-handshake runs against the broker in the background and can take a few
-seconds; this makes "hadn't joined yet" visible instead of a silent gap.
-
 ### `createRegistry()` — the composition point
 
 ```ts
 function createRegistry(config: {
   connections?: ConnectionConfiguration[];
   http?: HttpConfiguration[];
-  kafka?: { connector: RedpandaConnector; producers?: Record<...>; consumers?: Record<...> };
 }): {
   connections: () => { init, close, health, status };
   http: () => Map<string, HttpClient>;
-  kafka: () => { connect, producers: Map, consumers: Map } | undefined;
 }
 ```
 Every accessor is a **getter function, not a plain property** — matches
 the `pg()`/`mail()` convention every consumer already uses for shared
-instances (`connections()`, `http()`, `kafka()`, not `.connections`,
-`.http`, `.kafka`). `kafka()` returns `undefined` when the caller passed
-no `kafka` config at all (aham's case — it never touches Kafka).
+instances (`connections()`, `http()`, not `.connections`, `.http`).
 `connections().init()` is the one call that brings everything up: sets
-state to `INITIALIZING`, connects required/optional connections, connects
-Kafka if configured, runs the health check, sets state to `READY`, and
-returns the health report.
+state to `INITIALIZING`, connects required/optional connections, runs the
+health check, sets state to `READY`, and returns the health report.
 
-**Pass the *same* connector instance to both `connections` and `kafka`.**
-`kafka.connector` needs the concrete `RedpandaConnector`
-(`getProducer`/`getConsumer`); `connections` tracks it under the generic
-`Connector` shape (`connect`/`close`/`health`) for lifecycle/health
-purposes. A caller lists it once in each place, pointing at one instance —
-this is not two separate connections to the broker.
+## 6. Kafka producers / consumers — owned by the service
 
-## 6. `consumers/` directory convention (per-repo, not shared code)
-
-**Confirmed**, lives in each consumer's own `src/`, not in this package —
-documented here because the registry's design assumes it. `createKafka()`
-only subscribes; dispatching an incoming message needs the caller's own
-domain logic (DB tables, services), which `shared` has no business owning.
-The convention each repo follows:
-
-- `consumers/<name>.consumer.ts` exports one `onEachMessage` handler.
-- `consumers/index.ts` exports `{ subscribers, start }`:
-  ```ts
-  const subscribers: Record<keyof typeof config.kafka.consumers, EachMessageHandler> = { <name>: onEachMessage, ... };
-  async function start() {
-    for (const [key, entry] of Object.entries(config.kafka.consumers)) {
-      await kafka()?.consumers.get(entry.name)?.run({ eachMessage: subscribers[key] });
-    }
-  }
-  ```
-  The `Record<keyof typeof config.kafka.consumers, ...>` type is what
-  makes this compile-time-enforced: every declared consumer *must* have a
-  matching handler, or `tsc` fails with a missing-property error. Verified
-  directly — deliberately breaking the correspondence (emptying
-  `subscribers`) produced a real `tsc` error before being reverted, not
-  just claimed.
-- This lives in its own directory (not folded into `services/`) so
-  `consumers/*.consumer.ts` can import from `services/` without a
-  circular-import risk the other way around.
+**Revised.** The registry no longer touches Kafka. A service creates its
+producers / consumers through its `KafkaConnector` and owns their run loop —
+including re-subscribing and re-running a consumer after a reconnect, which
+needs the service's own message handler. The `consumers/` directory
+convention (one `onEachMessage` per `consumers/<name>.consumer.ts`, a
+`subscribers` map typed against the consumer config so a missing handler is a
+`tsc` error) stays in each service's own `src/`; see `notify`.
 
 ## 7. `lib/bootstrap.ts` — Elysia app shell & process lifecycle
 
@@ -380,9 +326,8 @@ caller needs the plugin outside the full `createApp()` shell.
 
 | | `aham` | `notify` |
 |---|---|---|
-| `registry` — connections | postgres (required) | postgres (required), redpanda (optional) |
+| `registry` — connections | postgres (required) | postgres (required); Kafka links owned by notify (§6) |
 | `registry` — http | `notify` (named client) | — |
-| `registry` — kafka | not used | producers: `notifier`; consumers: `notifications` |
 | `bootstrap` | `createApp`/`listen`/`boot` | `createApp`/`listen`/`boot` |
 | `error` | `createErrorEnum`; `reasonOf` not used | `createErrorEnum`; `reasonOf` (Kafka catch blocks) |
 | `log.middleware` | via `createApp()` only | via `createApp()` only |
@@ -402,7 +347,7 @@ a systematic `bun.lock` comparison and fixed with `bun update
 - A `services()`-style named-service registry generalizing `http()` beyond
   plain HTTP clients — not needed while every non-DB, non-Kafka dependency
   a consumer has is exactly one HTTP call away.
-- Multiple simultaneous Kafka clusters or Postgres DBs in one consumer —
+- Multiple simultaneous Postgres DBs in one consumer —
   confirmed compatible with the current design via composing multiple
   `createRegistry()` calls (§3), but no consumer needs it yet, so nothing
   further was built toward it.
@@ -425,10 +370,9 @@ tests/bootstrap/register-shutdown.test.ts — signal/exit paths (spied + a real 
 tests/bootstrap/boot.test.ts           — the composed import.meta.main body
 tests/registry/connections.test.ts     — connection lifecycle/health/close
 tests/registry/http.test.ts            — named HTTP client map
-tests/registry/kafka.test.ts           — producers/consumers, real broker
 ```
 
-47 tests, 109+ assertions, 100% line coverage on `registry.ts`/`error.ts`,
+43 tests, 104 assertions, 100% line coverage on `registry.ts`/`error.ts`,
 99%+ overall (`bun test --coverage`). The one documented gap:
 `log.middleware.ts`'s `pathOf()` catch branch (an unparsable
 `request.url`) is unreachable through a real `Request` — Bun/undici always
@@ -437,9 +381,7 @@ with a call this code can never actually receive in production.
 
 **No mocking of this package's own units.** Every test either exercises
 real code through its real entrypoint (`app.handle()` for `createApp`,
-a real Postgres via Docker for `connections`, a real Kafka broker via
-Docker for `kafka` — full publish → subscribe → group-join → consume,
-not simulated) or substitutes only the *external* boundary the design
+a real Postgres via Docker for `connections`) or substitutes only the *external* boundary the design
 itself is built around — a hand-written `Connector`-shaped stub for
 connect/health branch testing (exactly the interface `registry.ts` takes
 as config, not an internal of it), `process.exit`/`Bun.serve` spies
@@ -451,9 +393,9 @@ global signal-listener state.
 **Local test infrastructure — Docker Compose, not live cloud creds.**
 `docker-compose.yml` at the repo root brings up `postgres:18-trixie`
 (host port `55432` — `5432` was already taken by an unrelated container
-on the dev machine) and `apache/kafka:4.3.1` in KRaft mode over plain
-PLAINTEXT (no SSL/SASL needed locally — `RedpandaConnector`'s `ssl`/`sasl`
-are optional, §2). This replaced an earlier `.env.test` that pointed at a
+on the dev machine). (A Kafka service was there too until the registry's
+Kafka code moved to `@rniverse/connectors`, which tests Kafka itself.) This
+replaced an earlier `.env.test` that pointed at a
 live Aiven-hosted broker with real SASL credentials — dropped entirely
 once Compose proved sufficient, both to remove the live secret from a
 gitignored-but-still-real-credential file and to make `bun run test` not

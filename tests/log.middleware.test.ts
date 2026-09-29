@@ -42,7 +42,7 @@ describe('log.middleware — logger()', () => {
 		);
 		await waitFor(() => info.mock.calls.length >= 2);
 
-		const lines = info.mock.calls.map((call) => call[0]);
+		const lines = info.mock.calls.map((call) => String(call[0]));
 		expect(lines.some((line) => line.includes('Request started'))).toBe(true);
 		expect(lines.some((line) => line.includes('Request completed'))).toBe(true);
 	});
