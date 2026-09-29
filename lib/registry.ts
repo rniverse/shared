@@ -9,15 +9,15 @@ import type { Result } from '@rniverse/utils/result';
 // Generalizes the connection-lifecycle state machine (status + health
 // aggregator + init/close) and the per-service HTTP client map — both were
 // hand-rolled identically per repo, only the connector/service list ever
-// differed. `required` on a ConnectionConfiguration drives both phases: a
-// required connector failing to connect is fatal; an optional one is
-// best-effort (logged, doesn't take init() down) at both connect and
-// health-check time.
+// differed. `required` on a ConnectionConfiguration: a required connector is
+// awaited at init() and failing to connect is fatal; an optional one connects
+// in the background — it never holds up boot, a failure is only logged — and
+// being unhealthy doesn't take the working state down. init() runs no health
+// check; health runs only when asked (e.g. `/api/health`).
 //
-// Kafka producers / consumers are not here: `@rniverse/connectors` owns their
-// lifecycle (`KafkaConnector.producer()` / `.consumer()` links, tracked,
-// health-checked and closed with their connector). The owning service creates
-// and runs them.
+// Kafka producers / consumers are not here: `@rniverse/connectors` declares
+// them in the `KafkaConnector`'s config and connects them with it; the owning
+// service only subscribes / runs.
 //
 // Every accessor (`connections()`, `http()`) is a getter, not a plain
 // property — matches the `pg()` convention consumers use for shared instances.
@@ -105,16 +105,12 @@ function createConnections(configurations: ConnectionConfiguration[]) {
 		);
 		// Best-effort — an optional connector unreachable at startup doesn't
 		// take the process down, only its own health entry reports unhealthy.
-		await Promise.all(
-			optional.map((c) =>
-				c.connector.connect().catch((err) => {
-					log.error(
-						err,
-						`Optional connection '${c.name}' unavailable at startup`,
-					);
-				}),
-			),
-		);
+		// Not awaited: an optional connection never holds up boot.
+		for (const c of optional) {
+			c.connector.connect().catch((err) => {
+				log.warn(err, `Optional connection '${c.name}' unavailable at startup`);
+			});
+		}
 	};
 
 	const close = async (): Promise<void> => {
@@ -158,12 +154,11 @@ export function createRegistry(config: {
 	const connections = createConnections(config.connections ?? []);
 	const httpClients = createHttp(config.http ?? []);
 
-	const init = async (): Promise<HealthReport> => {
+	/** Required connections awaited, optional ones started in the background. No health check. */
+	const init = async (): Promise<void> => {
 		connections.setState(CONNECTION_STATUS.INITIALIZING);
 		await connections.connect();
-		const report = await connections.health();
 		connections.setState(CONNECTION_STATUS.READY);
-		return report;
 	};
 
 	return {

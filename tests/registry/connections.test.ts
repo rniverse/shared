@@ -7,22 +7,30 @@ import type { Result } from '@rniverse/utils/result';
 // is built around, so a hand-written stub here tests registry.ts's own
 // branching (required-vs-optional, state transitions) without depending on
 // how any *particular* real connector fails.
-function fakeConnector(name: string, behavior: { failConnect?: boolean } = {}) {
+function fakeConnector(
+	name: string,
+	behavior: { failConnect?: boolean; hangConnect?: boolean } = {},
+) {
 	let connected = false;
-	return {
+	const fake = {
 		name,
+		checks: 0,
 		connect: async () => {
+			if (behavior.hangConnect) return new Promise<void>(() => {});
 			if (behavior.failConnect) throw new Error(`${name}: connect failed`);
 			connected = true;
 		},
 		close: async () => {
 			connected = false;
 		},
-		health: async (): Promise<Result<void>> =>
-			connected
+		health: async (): Promise<Result<void>> => {
+			fake.checks++;
+			return connected
 				? { ok: true }
-				: { ok: false, error: new Error('not connected') },
+				: { ok: false, error: new Error('not connected') };
+		},
 	};
+	return fake;
 }
 
 describe('createRegistry — connections', () => {
@@ -36,7 +44,8 @@ describe('createRegistry — connections', () => {
 			connections: [{ name: 'good', connector: good, required: true }],
 		});
 
-		const report = await registry.connections().init();
+		await registry.connections().init();
+		const report = await registry.connections().health();
 
 		expect(report.ok).toBe(true);
 		expect(report.isInWorkingState).toBe(true);
@@ -56,9 +65,9 @@ describe('createRegistry — connections', () => {
 		expect(exit).toHaveBeenCalledWith(1);
 		// `process.exit(1)` is mocked here so the real process wouldn't actually
 		// die — `init()` keeps running past it (in production this never
-		// matters, the process is already gone). It finishes its own health
-		// check and unconditionally sets READY at the end, which is why this
-		// asserts `exit` rather than the terminal `status()`.
+		// matters, the process is already gone) and unconditionally sets READY
+		// at the end, which is why this asserts `exit` rather than the terminal
+		// `status()`.
 	});
 
 	test('an optional connector that fails to connect does not exit, but reports unhealthy', async () => {
@@ -72,7 +81,9 @@ describe('createRegistry — connections', () => {
 			],
 		});
 
-		const report = await registry.connections().init();
+		await registry.connections().init();
+		await Promise.resolve(); // the background connect's rejection lands
+		const report = await registry.connections().health();
 
 		expect(exit).not.toHaveBeenCalled();
 		expect(report.ok).toBe(false); // sidecar unhealthy
@@ -80,6 +91,30 @@ describe('createRegistry — connections', () => {
 		expect(report.services.primary).toEqual({ ok: true });
 		expect(report.services.sidecar?.ok).toBe(false);
 		expect(registry.connections().status()).toBe(CONNECTION_STATUS.READY);
+	});
+
+	test('an optional connector connects in the background — a hung one never holds up init()', async () => {
+		const primary = fakeConnector('primary');
+		const hung = fakeConnector('hung', { hangConnect: true });
+		const registry = createRegistry({
+			connections: [
+				{ name: 'primary', connector: primary, required: true },
+				{ name: 'hung', connector: hung, required: false },
+			],
+		});
+
+		await registry.connections().init(); // would never resolve if awaited
+		expect(registry.connections().status()).toBe(CONNECTION_STATUS.READY);
+	});
+
+	test('init() runs no health check', async () => {
+		const good = fakeConnector('good');
+		const registry = createRegistry({
+			connections: [{ name: 'good', connector: good, required: true }],
+		});
+
+		await registry.connections().init();
+		expect(good.checks).toBe(0);
 	});
 
 	test('a required connector unhealthy after connecting takes working state down', async () => {
@@ -143,8 +178,9 @@ describe('createRegistry — connections', () => {
 			connections: [{ name: 'b', connector: b, required: true }],
 		});
 
-		const reportA = await registryA.connections().init();
+		await registryA.connections().init();
 		await registryB.connections().init();
+		const reportA = await registryA.connections().health();
 
 		// registryA's connector never failed — its READY + healthy report is
 		// untouched by registryB's failure, proving there's no shared state
@@ -176,7 +212,8 @@ describe('createRegistry — connections, against a real Postgres', () => {
 			connections: [{ name: 'postgres', connector: postgres, required: true }],
 		});
 
-		const report = await registry.connections().init();
+		await registry.connections().init();
+		const report = await registry.connections().health();
 
 		expect(report.ok).toBe(true);
 		expect(report.services.postgres).toEqual({ ok: true });
