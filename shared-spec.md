@@ -32,9 +32,9 @@ every value it needs is passed in by the caller's own `config` module.
   rather than warning per request).
 - **Kafka: none — revised.** The registry used to create and subscribe
   Kafka producers / consumers. Since the connectors rewrite, that lifecycle
-  lives in `@rniverse/connectors` (`KafkaConnector.producer()` /
-  `.consumer()` links — tracked, health-checked, closed and released with
-  their connector), and the owning service creates and runs them. `kafkajs`
+  lives in `@rniverse/connectors`: producers / consumers are declared in the
+  `KafkaConnector`'s config and connected with it; the owning service only
+  subscribes / runs (in the consumer's `connect` listener). `kafkajs`
   is no longer a dependency of this package.
 - **Shared libs:** `@rniverse/utils` for `log`, `sync$seq`, `runWithContext`,
   `cxt$req`, its `request` re-export (`http()`/`HttpClient`/`ClientConfig`/
@@ -153,9 +153,10 @@ fits. A connectors link's `health()` and `close()` never throw (failures come
 back as a `Result`), and its `health()` is time-limited, so one hung
 dependency can't stall the aggregate report.
 `required` drives both connect and health-check behavior: a required
-connector failing at `connect()` is fatal (`process.exit(1)`); an optional
-one is best-effort — logged, doesn't take `init()` down, only its own
-health entry reports unhealthy. `health()` aggregates every configured
+connector is awaited at `init()` and failing at `connect()` is fatal
+(`process.exit(1)`); an optional one **connects in the background** — not
+awaited, so a slow or unreachable dependency never holds up boot; a failure
+is logged as a warning and only its own health entry reports unhealthy. `health()` aggregates every configured
 connector into `{ok, isInWorkingState, services}` — `isInWorkingState` is
 false only if a *required* connector is unhealthy; an unhealthy optional
 one still allows `ok: false` but leaves working state true.
@@ -185,15 +186,20 @@ Every accessor is a **getter function, not a plain property** — matches
 the `pg()`/`mail()` convention every consumer already uses for shared
 instances (`connections()`, `http()`, not `.connections`, `.http`).
 `connections().init()` is the one call that brings everything up: sets
-state to `INITIALIZING`, connects required/optional connections, runs the
-health check, sets state to `READY`, and returns the health report.
+state to `INITIALIZING`, awaits the required connections, starts the
+optional ones in the background, sets state to `READY`. It returns nothing
+and runs **no** health check (**revised** — it used to run one and return the
+report: for just-awaited connections that added nothing, and for background
+ones it was premature, logging "unhealthy" at every boot). Health runs only
+when asked — `connections().health()`, e.g. from `/api/health`.
 
 ## 6. Kafka producers / consumers — owned by the service
 
-**Revised.** The registry no longer touches Kafka. A service creates its
-producers / consumers through its `KafkaConnector` and owns their run loop —
-including re-subscribing and re-running a consumer after a reconnect, which
-needs the service's own message handler. The `consumers/` directory
+**Revised.** The registry no longer touches Kafka. A service declares its
+producers / consumers in its `KafkaConnector`'s config (the connector connects
+them, and kafkajs restarts a crashed consumer by itself) and only attaches
+what needs its own message handler: `subscribe()` + `run()` in the
+consumer's `connect` listener, which fires once per new consumer object. The `consumers/` directory
 convention (one `onEachMessage` per `consumers/<name>.consumer.ts`, a
 `subscribers` map typed against the consumer config so a missing handler is a
 `tsc` error) stays in each service's own `src/`; see `notify`.
@@ -204,7 +210,7 @@ convention (one `onEachMessage` per `consumers/<name>.consumer.ts`, a
 hand-rolling identically: error envelope, openapi docs, and the
 per-request `AsyncLocalStorage` wrap. Deliberately split into pieces
 rather than one `init()` — a caller that needs an extra step before
-listening (e.g. notify's Kafka consumer `start()`) just sequences it
+listening just sequences it
 between calls, no special hook needed here.
 
 ### `createApp(options)`

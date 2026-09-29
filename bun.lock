@@ -74,7 +74,7 @@
 
     "@protobufjs/utf8": ["@protobufjs/utf8@1.1.2", "", {}, "sha512-b1UQwcEZ4yCnMCD8DAL1VlbvBJE9/IX4FTIp7BG1xYpf29SLazLSrqUkj4w7Y5y7cCVP6E5tcqqcI0xemPkHug=="],
 
-    "@rniverse/connectors": ["@rniverse/connectors@github:rniverse/connectors#bd584ab", { "peerDependencies": { "@rniverse/utils": "github:rniverse/utils#dist", "@valkey/valkey-glide": "^2.5.2", "drizzle-orm": "^0.45.2", "kafkajs": "^2.2.4", "mongodb": "^7.6.0", "postgres": "^3.4.9", "typescript": "^7.0.2" } }, "rniverse-connectors-bd584ab", "sha512-l4YYx9Pu1TXlB5OOR+2Dnn2h03Zduu9dWIASkhX+Jst4bT1rOcew9VtnU4nKkNhD2h+XHtsSB1QfeYrAoxioyA=="],
+    "@rniverse/connectors": ["@rniverse/connectors@github:rniverse/connectors#0208e08", { "peerDependencies": { "@rniverse/utils": "github:rniverse/utils#dist", "@valkey/valkey-glide": "^2.5.2", "drizzle-orm": "^0.45.2", "kafkajs": "^2.2.4", "mongodb": "^7.6.0", "postgres": "^3.4.9", "typescript": "^7.0.2" } }, "rniverse-connectors-0208e08", "sha512-/dvs4cwm/QeJZgqla9kHIyxiyF+0rSx6uttrzbt73b0v1WwPmXgmOthr9ABNVGfbid3K4wj9Dg0KUVCjSwb7JQ=="],
 
     "@rniverse/utils": ["@rniverse/utils@github:rniverse/utils#d3e76a1", { "dependencies": { "ajv": "^8.20.0", "ajv-formats": "^3.0.1", "ajv-keywords": "^5.1.0", "dayjs": "^1.11.23", "es-toolkit": "^1.52.0", "jose": "^6.2.10", "ulid": "^3.0.2", "undici": "^8.10.1", "uuid": "^14.0.2", "valibot": "^1.4.2" }, "optionalDependencies": { "argon2": "^0.45.1" }, "peerDependencies": { "pino": "^10.3.1", "pino-pretty": "^13.1.3", "typescript": "^7.0.2" } }, "rniverse-utils-d3e76a1", "sha512-JElj30RD37s1Xsh5GdgL6I3oIacWn2tzcbJ0TXIFmsFbodo4SYOZKVhysJtyPff5gfSsacEsx5xU3p8n/LzNOA=="],
 
