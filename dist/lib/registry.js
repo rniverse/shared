@@ -1,7 +1,8 @@
 import { log } from '@rniverse/utils';
 import { http, } from '@rniverse/utils/request';
 // Generalizes the connection-lifecycle state machine (status + health
-// aggregator + init/close) and the per-service HTTP client map — both were
+// aggregator + init/close) and the per-service HTTP client map (whose
+// services join the same health report) — both were
 // hand-rolled identically per repo, only the connector/service list ever
 // differed. `required` on a ConnectionConfiguration: a required connector is
 // awaited at init() and failing to connect is fatal; an optional one connects
@@ -23,18 +24,26 @@ export const CONNECTION_STATUS = {
     ERROR: 'error',
     CLOSED: 'closed',
 };
-function createConnections(configurations) {
+function createConnections(configurations, services) {
     let state = CONNECTION_STATUS.IDLE;
+    const entries = [
+        ...configurations.map((c) => ({
+            name: c.name,
+            required: c.required,
+            health: () => c.connector.health(),
+        })),
+        ...services,
+    ];
     const health = async () => {
-        const results = await Promise.all(configurations.map(async (c) => ({
+        const results = await Promise.all(entries.map(async (c) => ({
             c,
-            result: await c.connector.health(),
+            result: await c.health(),
         })));
         let isInWorkingState = true;
         const services = {};
         for (const { c, result } of results) {
             if (!result.ok) {
-                log.error(result.error, `HEALTH CHECK: ${c.name} connection failed:`);
+                log.error(result.error, `HEALTH CHECK: ${c.name} failed:`);
                 if (c.required)
                     isInWorkingState = false;
             }
@@ -42,13 +51,13 @@ function createConnections(configurations) {
         }
         const ok = results.every(({ result }) => result.ok);
         if (ok) {
-            log.info('All connections are healthy');
+            log.info('All connections and services are healthy');
         }
         else if (isInWorkingState) {
-            log.warn(services, 'Some connections are unhealthy, but working state is OK:');
+            log.warn(services, 'Some connections or services are unhealthy, but working state is OK:');
         }
         else {
-            log.error(services, 'Not in working state, some critical connections are unhealthy');
+            log.error(services, 'Not in working state, some required connections or services are unhealthy');
         }
         return { ok, isInWorkingState, services };
     };
@@ -88,15 +97,27 @@ function createConnections(configurations) {
         health,
     };
 }
-function createHttp(configurations) {
-    return new Map(configurations.map(({ name, ...clientConfig }) => [
-        name,
-        http(clientConfig),
-    ]));
-}
 export function createRegistry(config) {
-    const connections = createConnections(config.connections ?? []);
-    const httpClients = createHttp(config.http ?? []);
+    const configured = [...(config.connections ?? []), ...(config.http ?? [])];
+    const names = new Set();
+    for (const { name } of configured) {
+        // Health report entries are keyed by name — a clash would hide one.
+        if (names.has(name))
+            throw new Error(`registry: duplicate name '${name}'`);
+        names.add(name);
+    }
+    const clients = (config.http ?? []).map(({ name, required, ...clientConfig }) => ({
+        name,
+        required,
+        client: http(clientConfig),
+    }));
+    const httpClients = new Map(clients.map((c) => [c.name, c.client]));
+    const services = clients.map(({ name, required, client }) => ({
+        name,
+        required,
+        health: () => client.health(),
+    }));
+    const connections = createConnections(config.connections ?? [], services);
     /** Required connections awaited, optional ones started in the background. No health check. */
     const init = async () => {
         connections.setState(CONNECTION_STATUS.INITIALIZING);

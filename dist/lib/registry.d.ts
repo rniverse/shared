@@ -22,8 +22,14 @@ export type ConnectionConfiguration = {
     connector: Connector;
     required: boolean;
 };
+/**
+ * `required` works like a connection's for the health report only: an
+ * unhealthy required service takes working state down. No HTTP service is
+ * checked at `init()` — boot never waits on another service being up.
+ */
 export type HttpConfiguration = ClientConfig & {
     name: string;
+    required: boolean;
 };
 export type HealthReport = {
     ok: boolean;
@@ -45,6 +51,7 @@ export declare function createRegistry(config: {
     };
     http: () => Map<string, {
         send: (method: string, path: string, options?: import("@rniverse/utils").RequestConfig) => Promise<Response>;
+        health: (options?: import("@rniverse/utils").RequestConfig) => Promise<Result<unknown>>;
         get: <T = unknown>(path: string, options?: import("@rniverse/utils").RequestConfig) => Promise<T>;
         post: <T = unknown>(path: string, options?: import("@rniverse/utils").RequestConfig) => Promise<T>;
         put: <T = unknown>(path: string, options?: import("@rniverse/utils").RequestConfig) => Promise<T>;
