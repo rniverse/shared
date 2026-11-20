@@ -164,12 +164,21 @@ one still allows `ok: false` but leaves working state true.
 ### HTTP
 
 ```ts
-type HttpConfiguration = ClientConfig & { name: string };
+type HttpConfiguration = ClientConfig & { name: string; required: boolean };
 ```
-`createHttp()` returns a plain `Map<string, HttpClient>` built from
+`http()` returns a plain `Map<string, HttpClient>` built from
 `@rniverse/utils/request`'s `http()`. Callers look a client up by name:
 `http().get('notify')` (aham's pattern for its one named client to the
 `notify` service).
+
+Every HTTP service also joins `connections().health()`: its client's
+`health()` (GET `ClientConfig.health`, default `/health`; any 2xx is
+healthy) is reported under its name next to the connectors. `required` means
+the same as for a connection **in the health report only**: an unhealthy
+required service sets `isInWorkingState` false. `init()` never calls an HTTP
+service — boot must not wait on another service being up (deploy order,
+restart loops). Names must be unique across connections and HTTP services;
+`createRegistry()` throws on a duplicate.
 
 ### `createRegistry()` — the composition point
 
