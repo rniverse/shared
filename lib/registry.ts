@@ -7,7 +7,8 @@ import {
 import type { Result } from '@rniverse/utils/result';
 
 // Generalizes the connection-lifecycle state machine (status + health
-// aggregator + init/close) and the per-service HTTP client map — both were
+// aggregator + init/close) and the per-service HTTP client map (whose
+// services join the same health report) — both were
 // hand-rolled identically per repo, only the connector/service list ever
 // differed. `required` on a ConnectionConfiguration: a required connector is
 // awaited at init() and failing to connect is fatal; an optional one connects
@@ -48,7 +49,22 @@ export type ConnectionConfiguration = {
 	required: boolean;
 };
 
-export type HttpConfiguration = ClientConfig & { name: string };
+/**
+ * `required` works like a connection's for the health report only: an
+ * unhealthy required service takes working state down. No HTTP service is
+ * checked at `init()` — boot never waits on another service being up.
+ */
+export type HttpConfiguration = ClientConfig & {
+	name: string;
+	required: boolean;
+};
+
+/** One entry in the health report — a connection or an HTTP service. */
+type HealthEntry = {
+	name: string;
+	required: boolean;
+	health(): Promise<Result<unknown>>;
+};
 
 export type HealthReport = {
 	ok: boolean;
@@ -56,37 +72,48 @@ export type HealthReport = {
 	services: Record<string, { ok: boolean; error?: unknown }>;
 };
 
-function createConnections(configurations: ConnectionConfiguration[]) {
+function createConnections(
+	configurations: ConnectionConfiguration[],
+	services: HealthEntry[],
+) {
 	let state: ConnectionStatus = CONNECTION_STATUS.IDLE;
+	const entries: HealthEntry[] = [
+		...configurations.map((c) => ({
+			name: c.name,
+			required: c.required,
+			health: () => c.connector.health(),
+		})),
+		...services,
+	];
 
 	const health = async (): Promise<HealthReport> => {
 		const results = await Promise.all(
-			configurations.map(async (c) => ({
+			entries.map(async (c) => ({
 				c,
-				result: await c.connector.health(),
+				result: await c.health(),
 			})),
 		);
 		let isInWorkingState = true;
 		const services: HealthReport['services'] = {};
 		for (const { c, result } of results) {
 			if (!result.ok) {
-				log.error(result.error, `HEALTH CHECK: ${c.name} connection failed:`);
+				log.error(result.error, `HEALTH CHECK: ${c.name} failed:`);
 				if (c.required) isInWorkingState = false;
 			}
 			services[c.name] = result;
 		}
 		const ok = results.every(({ result }) => result.ok);
 		if (ok) {
-			log.info('All connections are healthy');
+			log.info('All connections and services are healthy');
 		} else if (isInWorkingState) {
 			log.warn(
 				services,
-				'Some connections are unhealthy, but working state is OK:',
+				'Some connections or services are unhealthy, but working state is OK:',
 			);
 		} else {
 			log.error(
 				services,
-				'Not in working state, some critical connections are unhealthy',
+				'Not in working state, some required connections or services are unhealthy',
 			);
 		}
 		return { ok, isInWorkingState, services };
@@ -136,23 +163,34 @@ function createConnections(configurations: ConnectionConfiguration[]) {
 	};
 }
 
-function createHttp(
-	configurations: HttpConfiguration[],
-): Map<string, HttpClient> {
-	return new Map(
-		configurations.map(({ name, ...clientConfig }) => [
-			name,
-			http(clientConfig),
-		]),
-	);
-}
-
 export function createRegistry(config: {
 	connections?: ConnectionConfiguration[];
 	http?: HttpConfiguration[];
 }) {
-	const connections = createConnections(config.connections ?? []);
-	const httpClients = createHttp(config.http ?? []);
+	const configured = [...(config.connections ?? []), ...(config.http ?? [])];
+	const names = new Set<string>();
+	for (const { name } of configured) {
+		// Health report entries are keyed by name — a clash would hide one.
+		if (names.has(name)) throw new Error(`registry: duplicate name '${name}'`);
+		names.add(name);
+	}
+
+	const clients = (config.http ?? []).map(
+		({ name, required, ...clientConfig }) => ({
+			name,
+			required,
+			client: http(clientConfig),
+		}),
+	);
+	const httpClients = new Map<string, HttpClient>(
+		clients.map((c) => [c.name, c.client]),
+	);
+	const services: HealthEntry[] = clients.map(({ name, required, client }) => ({
+		name,
+		required,
+		health: () => client.health(),
+	}));
+	const connections = createConnections(config.connections ?? [], services);
 
 	/** Required connections awaited, optional ones started in the background. No health check. */
 	const init = async (): Promise<void> => {
