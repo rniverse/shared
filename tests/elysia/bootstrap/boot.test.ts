@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, mock, spyOn, test } from 'bun:test';
-import { boot } from '@lib/bootstrap';
+import { boot } from '@elysia/bootstrap';
 import { cxt$req } from '@rniverse/utils/context';
 
 describe('boot', () => {

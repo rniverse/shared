@@ -5,16 +5,22 @@ import {
 	http,
 } from '@rniverse/utils/request';
 import type { Result } from '@rniverse/utils/result';
+import {
+	createHealth,
+	type HealthOptions,
+	type Phase,
+	type Probe,
+} from './health';
 
-// Generalizes the connection-lifecycle state machine (status + health
-// aggregator + init/close) and the per-service HTTP client map (whose
-// services join the same health report) — both were
+// Generalizes the connection-lifecycle state machine (status + init/close),
+// the per-service HTTP client map, and their health checks — all were
 // hand-rolled identically per repo, only the connector/service list ever
 // differed. `required` on a ConnectionConfiguration: a required connector is
 // awaited at init() and failing to connect is fatal; an optional one connects
 // in the background — it never holds up boot, a failure is only logged — and
-// being unhealthy doesn't take the working state down. init() runs no health
-// check; health runs only when asked (e.g. `/api/health`).
+// it never fails readiness. HTTP services are never required: they show in
+// `health.details()` only, so another service being down never takes this
+// one out (see `lib/health.ts`).
 //
 // Kafka producers / consumers are not here: `@rniverse/connectors` declares
 // them in the `KafkaConnector`'s config and connects them with it; the owning
@@ -41,6 +47,13 @@ type Connector = {
 	close(): Promise<void>;
 	/** Never throws for a connectors link — failures come back as a Result. */
 	health(): Promise<Result<unknown>>;
+	/** A connectors link's circuit-breaker state. */
+	readonly circuit?: string;
+	/** A connectors link's events; the registry listens to `fail`. */
+	on?(
+		type: 'fail',
+		listener: { name: string; handler: (event: { error: unknown }) => unknown },
+	): void;
 };
 
 export type ConnectionConfiguration = {
@@ -49,75 +62,91 @@ export type ConnectionConfiguration = {
 	required: boolean;
 };
 
-/**
- * `required` works like a connection's for the health report only: an
- * unhealthy required service takes working state down. No HTTP service is
- * checked at `init()` — boot never waits on another service being up.
- */
-export type HttpConfiguration = ClientConfig & {
+/** An HTTP service. Never required — it shows in `health.details()` only. */
+export type HttpConfiguration = ClientConfig & { name: string };
+
+export type RegistryHealthOptions = HealthOptions & {
+	/** HTTP services: attempts per check. Default 1 (no retries). */
+	attempts?: number;
+	/** HTTP services: ms per attempt. Default 5_000. */
+	timeout?: number;
+};
+
+const HTTP_HEALTH_DEFAULTS = { attempts: 1, timeout: 5_000 } as const;
+
+function phaseOf(state: ConnectionStatus): Phase {
+	if (state === CONNECTION_STATUS.READY) return 'ready';
+	if (
+		state === CONNECTION_STATUS.IDLE ||
+		state === CONNECTION_STATUS.INITIALIZING
+	) {
+		return 'starting';
+	}
+	return 'closing';
+}
+
+export function createRegistry(config: {
+	/** This service's name, shown in `health.details()`. */
 	name: string;
-	required: boolean;
-};
+	version?: string;
+	connections?: ConnectionConfiguration[];
+	http?: HttpConfiguration[];
+	health?: RegistryHealthOptions;
+}) {
+	const configurations = config.connections ?? [];
+	const names = new Set<string>();
+	for (const { name } of [...configurations, ...(config.http ?? [])]) {
+		// Health checks are keyed by name — a clash would hide one.
+		if (names.has(name)) throw new Error(`registry: duplicate name '${name}'`);
+		names.add(name);
+	}
 
-/** One entry in the health report — a connection or an HTTP service. */
-type HealthEntry = {
-	name: string;
-	required: boolean;
-	health(): Promise<Result<unknown>>;
-};
-
-export type HealthReport = {
-	ok: boolean;
-	isInWorkingState: boolean;
-	services: Record<string, { ok: boolean; error?: unknown }>;
-};
-
-function createConnections(
-	configurations: ConnectionConfiguration[],
-	services: HealthEntry[],
-) {
 	let state: ConnectionStatus = CONNECTION_STATUS.IDLE;
-	const entries: HealthEntry[] = [
-		...configurations.map((c) => ({
-			name: c.name,
-			required: c.required,
-			health: () => c.connector.health(),
-		})),
-		...services,
+
+	const clients = (config.http ?? []).map(({ name, ...clientConfig }) => ({
+		name,
+		client: http(clientConfig),
+	}));
+	const httpClients = new Map<string, HttpClient>(
+		clients.map((c) => [c.name, c.client]),
+	);
+
+	const attempts = config.health?.attempts ?? HTTP_HEALTH_DEFAULTS.attempts;
+	const timeout = config.health?.timeout ?? HTTP_HEALTH_DEFAULTS.timeout;
+	const probes: Probe[] = [
+		...configurations.map(
+			({ name, connector, required }): Probe => ({
+				name,
+				kind: 'connection',
+				required,
+				check: () => connector.health(),
+				circuit: () => connector.circuit,
+				watch: connector.on
+					? (onFail) =>
+							connector.on?.('fail', {
+								name: `health:${config.name}`,
+								handler: ({ error }) => onFail(error),
+							})
+					: undefined,
+			}),
+		),
+		...clients.map(
+			({ name, client }): Probe => ({
+				name,
+				kind: 'service',
+				required: false,
+				check: () => client.health({ retries: attempts - 1, timeout }),
+			}),
+		),
 	];
 
-	const health = async (): Promise<HealthReport> => {
-		const results = await Promise.all(
-			entries.map(async (c) => ({
-				c,
-				result: await c.health(),
-			})),
-		);
-		let isInWorkingState = true;
-		const services: HealthReport['services'] = {};
-		for (const { c, result } of results) {
-			if (!result.ok) {
-				log.error(result.error, `HEALTH CHECK: ${c.name} failed:`);
-				if (c.required) isInWorkingState = false;
-			}
-			services[c.name] = result;
-		}
-		const ok = results.every(({ result }) => result.ok);
-		if (ok) {
-			log.info('All connections and services are healthy');
-		} else if (isInWorkingState) {
-			log.warn(
-				services,
-				'Some connections or services are unhealthy, but working state is OK:',
-			);
-		} else {
-			log.error(
-				services,
-				'Not in working state, some required connections or services are unhealthy',
-			);
-		}
-		return { ok, isInWorkingState, services };
-	};
+	const health = createHealth({
+		name: config.name,
+		version: config.version,
+		probes,
+		phase: () => phaseOf(state),
+		options: config.health,
+	});
 
 	const connect = async (): Promise<void> => {
 		const required = configurations.filter((c) => c.required);
@@ -131,7 +160,7 @@ function createConnections(
 			},
 		);
 		// Best-effort — an optional connector unreachable at startup doesn't
-		// take the process down, only its own health entry reports unhealthy.
+		// take the process down, only its own health entry reports it.
 		// Not awaited: an optional connection never holds up boot.
 		for (const c of optional) {
 			c.connector.connect().catch((err) => {
@@ -140,7 +169,25 @@ function createConnections(
 		}
 	};
 
+	/**
+	 * Required connections awaited, optional ones started in the background,
+	 * then one non-fatal health check of everything so the cache is filled
+	 * before the first request.
+	 */
+	const init = async (): Promise<void> => {
+		state = CONNECTION_STATUS.INITIALIZING;
+		await connect();
+		// READY first so the report reflects the checks, not the boot phase.
+		// The server isn't listening yet, so nothing reads it in between.
+		state = CONNECTION_STATUS.READY;
+		const { body } = await health.details();
+		const level = body.status === 'pass' ? 'info' : 'warn';
+		log[level](body.checks, `Health at startup: ${body.status}`);
+	};
+
 	const close = async (): Promise<void> => {
+		// Readiness answers 503 from here on, so a load balancer stops routing
+		// before the connections go.
 		state = CONNECTION_STATUS.CLOSING;
 		await Promise.all(configurations.map((c) => c.connector.close())).catch(
 			(err) => {
@@ -153,59 +200,8 @@ function createConnections(
 	};
 
 	return {
-		state: () => state,
-		setState: (next: ConnectionStatus) => {
-			state = next;
-		},
-		connect,
-		close,
-		health,
-	};
-}
-
-export function createRegistry(config: {
-	connections?: ConnectionConfiguration[];
-	http?: HttpConfiguration[];
-}) {
-	const configured = [...(config.connections ?? []), ...(config.http ?? [])];
-	const names = new Set<string>();
-	for (const { name } of configured) {
-		// Health report entries are keyed by name — a clash would hide one.
-		if (names.has(name)) throw new Error(`registry: duplicate name '${name}'`);
-		names.add(name);
-	}
-
-	const clients = (config.http ?? []).map(
-		({ name, required, ...clientConfig }) => ({
-			name,
-			required,
-			client: http(clientConfig),
-		}),
-	);
-	const httpClients = new Map<string, HttpClient>(
-		clients.map((c) => [c.name, c.client]),
-	);
-	const services: HealthEntry[] = clients.map(({ name, required, client }) => ({
-		name,
-		required,
-		health: () => client.health(),
-	}));
-	const connections = createConnections(config.connections ?? [], services);
-
-	/** Required connections awaited, optional ones started in the background. No health check. */
-	const init = async (): Promise<void> => {
-		connections.setState(CONNECTION_STATUS.INITIALIZING);
-		await connections.connect();
-		connections.setState(CONNECTION_STATUS.READY);
-	};
-
-	return {
-		connections: () => ({
-			init,
-			close: connections.close,
-			health: connections.health,
-			status: connections.state,
-		}),
+		connections: () => ({ init, close, status: () => state }),
 		http: () => httpClients,
+		health,
 	};
 }

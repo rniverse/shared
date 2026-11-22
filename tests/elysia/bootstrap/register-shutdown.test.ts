@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, mock, spyOn, test } from 'bun:test';
-import { registerShutdown } from '@lib/bootstrap';
+import { registerShutdown } from '@elysia/bootstrap';
 
 describe('registerShutdown', () => {
 	afterEach(() => {
@@ -52,7 +52,7 @@ describe('registerShutdown', () => {
 describe('registerShutdown — real signal wiring (subprocess)', () => {
 	test('SIGINT triggers onShutdown and a clean process.exit(0)', async () => {
 		const script = `
-			import { registerShutdown } from '${import.meta.dir}/../../lib/bootstrap.ts';
+			import { registerShutdown } from '${import.meta.dir}/../../../elysia/bootstrap.ts';
 			registerShutdown({
 				onShutdown: async (signal) => {
 					console.log('SHUTDOWN:' + signal);

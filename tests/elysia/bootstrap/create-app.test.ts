@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { createApp } from '@lib/bootstrap';
+import { createApp } from '@elysia/bootstrap';
 import { createErrorEnum } from '@lib/error';
 import Elysia, { t } from 'elysia';
 import * as v from 'valibot';

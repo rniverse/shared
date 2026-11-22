@@ -41,15 +41,16 @@ describe('createRegistry — connections', () => {
 	test('a required connector that connects successfully reaches READY with a healthy report', async () => {
 		const good = fakeConnector('good');
 		const registry = createRegistry({
+			name: 'test',
 			connections: [{ name: 'good', connector: good, required: true }],
 		});
 
 		await registry.connections().init();
-		const report = await registry.connections().health();
+		const { code, body } = await registry.health.details();
 
-		expect(report.ok).toBe(true);
-		expect(report.isInWorkingState).toBe(true);
-		expect(report.services.good).toEqual({ ok: true });
+		expect(code).toBe(200);
+		expect(body.status).toBe('pass');
+		expect(body.checks.good?.status).toBe('pass');
 		expect(registry.connections().status()).toBe(CONNECTION_STATUS.READY);
 	});
 
@@ -57,6 +58,7 @@ describe('createRegistry — connections', () => {
 		const exit = spyOn(process, 'exit').mockImplementation((() => {}) as any);
 		const bad = fakeConnector('bad', { failConnect: true });
 		const registry = createRegistry({
+			name: 'test',
 			connections: [{ name: 'bad', connector: bad, required: true }],
 		});
 
@@ -75,6 +77,7 @@ describe('createRegistry — connections', () => {
 		const required = fakeConnector('primary');
 		const optional = fakeConnector('sidecar', { failConnect: true });
 		const registry = createRegistry({
+			name: 'test',
 			connections: [
 				{ name: 'primary', connector: required, required: true },
 				{ name: 'sidecar', connector: optional, required: false },
@@ -83,13 +86,14 @@ describe('createRegistry — connections', () => {
 
 		await registry.connections().init();
 		await Promise.resolve(); // the background connect's rejection lands
-		const report = await registry.connections().health();
+		const { code, body } = await registry.health.details();
 
 		expect(exit).not.toHaveBeenCalled();
-		expect(report.ok).toBe(false); // sidecar unhealthy
-		expect(report.isInWorkingState).toBe(true); // but it's optional
-		expect(report.services.primary).toEqual({ ok: true });
-		expect(report.services.sidecar?.ok).toBe(false);
+		expect(code).toBe(200); // sidecar is optional
+		expect(body.status).toBe('warn');
+		expect(body.checks.primary?.status).toBe('pass');
+		expect(body.checks.sidecar?.status).toBe('warn');
+		expect((await registry.health.ready()).code).toBe(200);
 		expect(registry.connections().status()).toBe(CONNECTION_STATUS.READY);
 	});
 
@@ -97,6 +101,7 @@ describe('createRegistry — connections', () => {
 		const primary = fakeConnector('primary');
 		const hung = fakeConnector('hung', { hangConnect: true });
 		const registry = createRegistry({
+			name: 'test',
 			connections: [
 				{ name: 'primary', connector: primary, required: true },
 				{ name: 'hung', connector: hung, required: false },
@@ -107,35 +112,58 @@ describe('createRegistry — connections', () => {
 		expect(registry.connections().status()).toBe(CONNECTION_STATUS.READY);
 	});
 
-	test('init() runs no health check', async () => {
+	test('init() runs one health check, so the cache is filled before the first request', async () => {
 		const good = fakeConnector('good');
 		const registry = createRegistry({
+			name: 'test',
 			connections: [{ name: 'good', connector: good, required: true }],
 		});
 
 		await registry.connections().init();
-		expect(good.checks).toBe(0);
+		expect(good.checks).toBe(1);
+		await registry.health.ready(); // fresh — served from the cache
+		expect(good.checks).toBe(1);
+	});
+
+	test('a failing check at init() is logged, never fatal', async () => {
+		const exit = spyOn(process, 'exit').mockImplementation((() => {}) as any);
+		const flaky = fakeConnector('flaky');
+		flaky.health = async () => ({ ok: false, error: new Error('down') });
+		const registry = createRegistry({
+			name: 'test',
+			connections: [{ name: 'flaky', connector: flaky, required: true }],
+		});
+
+		await registry.connections().init();
+		expect(exit).not.toHaveBeenCalled();
+		expect(registry.connections().status()).toBe(CONNECTION_STATUS.READY);
 	});
 
 	test('a required connector unhealthy after connecting takes working state down', async () => {
 		const flaky = fakeConnector('flaky');
 		const registry = createRegistry({
+			name: 'test',
 			connections: [{ name: 'flaky', connector: flaky, required: true }],
+			health: { ttl: 0 },
 		});
 		await registry.connections().init();
-		// Force it unhealthy after the fact without touching registry.ts.
+		// Force it unhealthy after the fact without touching registry.ts. A
+		// zero ttl makes the next read refresh; it serves the stored pass first.
 		await flaky.close();
+		await registry.health.ready();
+		await new Promise((resolve) => setTimeout(resolve, 0)); // the refresh lands
 
-		const report = await registry.connections().health();
+		const { code, body } = await registry.health.ready();
 
-		expect(report.ok).toBe(false);
-		expect(report.isInWorkingState).toBe(false);
+		expect(code).toBe(503);
+		expect(body).toEqual({ status: 'fail' });
 	});
 
 	test('close() calls every connector.close() and reaches CLOSED', async () => {
 		const one = fakeConnector('one');
 		const two = fakeConnector('two');
 		const registry = createRegistry({
+			name: 'test',
 			connections: [
 				{ name: 'one', connector: one, required: true },
 				{ name: 'two', connector: two, required: false },
@@ -146,6 +174,8 @@ describe('createRegistry — connections', () => {
 		await registry.connections().close();
 
 		expect(registry.connections().status()).toBe(CONNECTION_STATUS.CLOSED);
+		// Readiness fails once shutdown starts.
+		expect((await registry.health.ready()).code).toBe(503);
 		expect((await one.health()).ok).toBe(false);
 		expect((await two.health()).ok).toBe(false);
 	});
@@ -157,6 +187,7 @@ describe('createRegistry — connections', () => {
 			throw new Error('close failed');
 		};
 		const registry = createRegistry({
+			name: 'test',
 			connections: [{ name: 'broken', connector: broken, required: true }],
 		});
 		await registry.connections().init();
@@ -172,20 +203,22 @@ describe('createRegistry — connections', () => {
 		const exit = spyOn(process, 'exit').mockImplementation((() => {}) as any);
 
 		const registryA = createRegistry({
+			name: 'test',
 			connections: [{ name: 'a', connector: a, required: true }],
 		});
 		const registryB = createRegistry({
+			name: 'test',
 			connections: [{ name: 'b', connector: b, required: true }],
 		});
 
 		await registryA.connections().init();
 		await registryB.connections().init();
-		const reportA = await registryA.connections().health();
+		const reportA = (await registryA.health.details()).body;
 
 		// registryA's connector never failed — its READY + healthy report is
 		// untouched by registryB's failure, proving there's no shared state
 		// between two createRegistry() calls (§3 of spec.md).
-		expect(reportA.ok).toBe(true);
+		expect(reportA.status).toBe('pass');
 		expect(registryA.connections().status()).toBe(CONNECTION_STATUS.READY);
 		expect(exit).toHaveBeenCalledTimes(1);
 		expect(exit).toHaveBeenCalledWith(1);
@@ -209,13 +242,15 @@ describe('createRegistry — connections, against a real Postgres', () => {
 
 	test('a real PostgresConnector connects and reports healthy through the registry', async () => {
 		const registry = createRegistry({
+			name: 'test',
 			connections: [{ name: 'postgres', connector: postgres, required: true }],
 		});
 
 		await registry.connections().init();
-		const report = await registry.connections().health();
+		const { code, body } = await registry.health.details();
 
-		expect(report.ok).toBe(true);
-		expect(report.services.postgres).toEqual({ ok: true });
+		expect(code).toBe(200);
+		expect(body.checks.postgres?.status).toBe('pass');
+		expect(body.checks.postgres?.circuit).toBe('closed');
 	});
 });

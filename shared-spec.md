@@ -80,30 +80,40 @@ separate Elysia app instances, though no current service does).
 ## 4. Package layout & exports
 
 ```
-index.ts                      — barrel: re-exports everything below
-lib/registry.ts                — createRegistry (connections/http)
-lib/bootstrap.ts                — createApp, listen, registerShutdown, boot
-lib/error.ts                    — createErrorEnum, reasonOf
-middlewares/log.middleware.ts   — request-logging Elysia plugin
-tests/                          — this package's own test suite (§12)
+index.ts                              — barrel: re-exports lib/ (framework-free)
+lib/registry.ts                       — createRegistry (connections/http/health)
+lib/health.ts                         — health signals: live/startup/ready/details, cache per entry
+lib/auth.ts                           — createAuth: Bearer parse, JWT verify (key or JWKS), strict check
+lib/error.ts                          — createErrorEnum, reasonOf
+elysia/index.ts                       — Elysia barrel: bootstrap + `middleware` + `plugin`
+elysia/bootstrap.ts                   — createApp, listen, registerShutdown, boot
+elysia/middlewares/log.middleware.ts  — request logging
+elysia/middlewares/auth.middleware.ts — soft/base/strict guards over lib/auth.ts
+elysia/plugins/health.plugin.ts       — the four /health/* routes over lib/health.ts
+tests/                                — this package's own test suite (§12)
 docker-compose.yml              — local Postgres for tests/ (§12)
 ```
 
-Published as **subpath exports**, not only the barrel — every consumer
-import in `aham`/`notify` uses the specific subpath
-(`@rniverse/shared/registry`, `@rniverse/shared/bootstrap`,
-`@rniverse/shared/error`), never the bare `@rniverse/shared` barrel or
-`@rniverse/shared/log.middleware` directly (the logger is wired internally
-by `createApp()`, no consumer needs it standalone today, though the
-subpath is exported in case one ever does):
+**Framework split** (2026-11-22): `lib/` never imports Elysia; everything
+Elysia-specific lives under `elysia/` and is a thin layer over `lib/`. A
+later Hono (or other) layer would sit beside it as `hono/` and reuse `lib/`.
+Inside `elysia/`, a *middleware* hooks other routes (log, auth) and a
+*plugin* owns routes of its own (health).
+
+Published as **subpath exports**, not only the barrel — consumers import the
+specific subpath (`@rniverse/shared/registry`, `@rniverse/shared/auth`,
+`@rniverse/shared/error`, `@rniverse/shared/elysia`). `./bootstrap` and
+`./log.middleware` were **removed**: both now come from `./elysia`
+(`createApp`/`listen`/`boot`, `middleware.log`).
 
 ```json
 "exports": {
   ".": { "types": "./dist/index.d.ts", "default": "./dist/index.js" },
   "./error": { "types": "./dist/lib/error.d.ts", "default": "./dist/lib/error.js" },
   "./registry": { "types": "./dist/lib/registry.d.ts", "default": "./dist/lib/registry.js" },
-  "./bootstrap": { "types": "./dist/lib/bootstrap.d.ts", "default": "./dist/lib/bootstrap.js" },
-  "./log.middleware": { "types": "./dist/middlewares/log.middleware.d.ts", "default": "./dist/middlewares/log.middleware.js" },
+  "./health": { "types": "./dist/lib/health.d.ts", "default": "./dist/lib/health.js" },
+  "./auth": { "types": "./dist/lib/auth.d.ts", "default": "./dist/lib/auth.js" },
+  "./elysia": { "types": "./dist/elysia/index.d.ts", "default": "./dist/elysia/index.js" },
   "./package.json": "./package.json"
 }
 ```
@@ -121,7 +131,7 @@ existed, and is exactly the setup that broke `instanceof` (§2).
 3. `rm -rf node_modules dist && bun install && bun run build`
    (`tsc --project tsconfig.build.json && tsc-alias --project
    tsconfig.build.json` — emits `.js`+`.d.ts`+sourcemaps to `dist/`,
-   `tsc-alias` resolves the `@lib/*`/`@middlewares/*` path aliases to
+   `tsc-alias` resolves the `@lib/*`/`@elysia/*` path aliases to
    relative imports since the published package ships no path-alias
    resolution of its own).
 4. Commit ("build"), push `dist`.
@@ -156,39 +166,77 @@ dependency can't stall the aggregate report.
 connector is awaited at `init()` and failing at `connect()` is fatal
 (`process.exit(1)`); an optional one **connects in the background** — not
 awaited, so a slow or unreachable dependency never holds up boot; a failure
-is logged as a warning and only its own health entry reports unhealthy. `health()` aggregates every configured
-connector into `{ok, isInWorkingState, services}` — `isInWorkingState` is
-false only if a *required* connector is unhealthy; an unhealthy optional
-one still allows `ok: false` but leaves working state true.
+is logged as a warning and only its own health entry reports it. Only a
+*required* connection fails readiness; an optional one is a `warn` in
+`health.details()` (see Health below).
+
+The registry listens to each connector's `fail` event (when it has `on`)
+and marks that health entry failed at once, and shows the connector's
+`circuit` state in `details`.
 
 ### HTTP
 
 ```ts
-type HttpConfiguration = ClientConfig & { name: string; required: boolean };
+type HttpConfiguration = ClientConfig & { name: string }; // never required
 ```
 `http()` returns a plain `Map<string, HttpClient>` built from
 `@rniverse/utils/request`'s `http()`. Callers look a client up by name:
 `http().get('notify')` (aham's pattern for its one named client to the
 `notify` service).
 
-Every HTTP service also joins `connections().health()`: its client's
-`health()` (GET `ClientConfig.health`, default `/health`; any 2xx is
-healthy) is reported under its name next to the connectors. `required` means
-the same as for a connection **in the health report only**: an unhealthy
-required service sets `isInWorkingState` false. `init()` never calls an HTTP
-service — boot must not wait on another service being up (deploy order,
-restart loops). Names must be unique across connections and HTTP services;
+Every HTTP service shows in `health.details()` only: its client's `health()`
+(GET `ClientConfig.health`, default `/health`; any 2xx is healthy) under its
+name, `kind: 'service'`. **`required` was removed** (2026-11-22): another
+service being down never fails readiness or boot — rerouting away from this
+one doesn't fix that outage, and it would cascade (A checks B checks C).
+Point `ClientConfig.health` at the other service's `/health/ready`, which
+never checks services, so chains and cycles can't happen. A service check
+makes `health.attempts` calls (default 1) of `health.timeout` ms each
+(default 5_000). Names must be unique across connections and HTTP services;
 `createRegistry()` throws on a duplicate.
+
+### Health (`lib/health.ts`)
+
+Four signals, returned as plain `{ code, body }` so any HTTP layer can serve
+them (`elysia/plugins/health.plugin.ts` maps them to `/health/live`,
+`/health/startup`, `/health/ready`, `/health/details`):
+
+| Signal | Checks | Code | Body |
+|---|---|---|---|
+| `live()` | nothing external | always 200 | `{ status: 'pass' }` |
+| `startup()` | `init()` finished | 200 / 503 | `{ status }` |
+| `ready()` | required connections | 200 / 503 / 504 | `{ status }` |
+| `details()` | every connection + service | 200 / 503 / 504 | `{ status, service, version?, checks }` |
+
+- 503: a required entry failed, or the registry isn't `READY` (starting,
+  closing — so a load balancer stops routing before connections close).
+  504: nothing required failed, but a required entry has no result yet.
+  200 otherwise; `status` is `pass`, or `warn` when something optional
+  failed.
+- Each entry is checked on demand and cached for `ttl` (default 30_000 ms).
+  A read always answers from the stored result; a stale or failed one is
+  refreshed in the background, one check per entry at a time (`lazy` from
+  utils). Only an entry that has never settled makes a read wait, capped by
+  `wait` (default 1_000 ms). Entries are read in parallel.
+- `details` errors are `name: message` only, never a stack. A message can
+  still carry a host (e.g. `ECONNREFUSED 127.0.0.1:5432`), so mount
+  `details` behind a guard or keep it internal.
+- No background ticker: it can't run on Workers. Add one (or a scheduled
+  checker) only if a long-running host needs it.
 
 ### `createRegistry()` — the composition point
 
 ```ts
 function createRegistry(config: {
+  name: string;          // shown as `service` in details; use config.appName
+  version?: string;
   connections?: ConnectionConfiguration[];
   http?: HttpConfiguration[];
+  health?: { ttl?: number; wait?: number; attempts?: number; timeout?: number };
 }): {
-  connections: () => { init, close, health, status };
+  connections: () => { init, close, status };
   http: () => Map<string, HttpClient>;
+  health: { live, startup, ready, details };
 }
 ```
 Every accessor is a **getter function, not a plain property** — matches
@@ -196,11 +244,39 @@ the `pg()`/`mail()` convention every consumer already uses for shared
 instances (`connections()`, `http()`, not `.connections`, `.http`).
 `connections().init()` is the one call that brings everything up: sets
 state to `INITIALIZING`, awaits the required connections, starts the
-optional ones in the background, sets state to `READY`. It returns nothing
-and runs **no** health check (**revised** — it used to run one and return the
-report: for just-awaited connections that added nothing, and for background
-ones it was premature, logging "unhealthy" at every boot). Health runs only
-when asked — `connections().health()`, e.g. from `/api/health`.
+optional ones in the background, sets state to `READY`, then runs one
+non-fatal `health.details()` and logs it, so the cache is filled before the
+first request. (**Revised again** 2026-11-22 — it had stopped running a
+check because optional connections still connecting logged "unhealthy" at
+every boot; now they're a `warn`, and a still-connecting one only holds the
+check up to `wait`.) It returns nothing; a failing check is never fatal.
+
+## 5a. `lib/auth.ts` + `elysia/middlewares/auth.middleware.ts` — access tokens
+
+Moved from aham (2026-11-22). `lib/auth.ts` verifies only — signing and the
+private key stay in the issuer (aham). It never reads env: each service
+passes its key source from its own config.
+
+```ts
+createAuth<P extends { sub: string }>({
+  source: { key: string } | { jwks: string }, // issuer: its PEM public key; others: the issuer's JWKS URL
+  issuer: string,                             // expected `iss`
+  check?: (payload: P) => Promise<boolean>,   // strict only: true = blocked
+}): { strict: boolean; bearer(header); verify({ token?, user?, strict? }): Promise<Result<P, 'missing' | 'invalid' | 'blocked'>> }
+```
+
+RS256 is pinned. A `{ jwks }` source uses jose `createRemoteJWKSet`: keys are
+fetched on first use, cached, and refetched on an unknown `kid`, so a key
+rotation in aham needs no change elsewhere. Other services only need
+`AUTH_SERVICE_URL` (aham serves `/.well-known/jwks.json`).
+
+`middleware.auth(verifier, { unauthorized, invalid })` (from
+`@rniverse/shared/elysia`) builds the `soft` / `base` / `strict` guards aham
+had: `soft` never throws and gives `user | undefined`; `base` requires a
+valid token; `strict` adds `check` and reuses `base`'s `user`. `missing` maps
+to `unauthorized()`, `invalid` / `blocked` to `invalid()`, so each service
+keeps its own error envelope. Every guard sets `userId` on the request
+context. Reading `strict` from a verifier without `check` throws.
 
 ## 6. Kafka producers / consumers — owned by the service
 
@@ -213,7 +289,7 @@ convention (one `onEachMessage` per `consumers/<name>.consumer.ts`, a
 `subscribers` map typed against the consumer config so a missing handler is a
 `tsc` error) stays in each service's own `src/`; see `notify`.
 
-## 7. `lib/bootstrap.ts` — Elysia app shell & process lifecycle
+## 7. `elysia/bootstrap.ts` — Elysia app shell & process lifecycle
 
 **Confirmed.** Generalizes the Elysia app shell every service was
 hand-rolling identically: error envelope, openapi docs, and the
@@ -326,7 +402,7 @@ list entry for the same logical error at a different status.
 — a one-line normalizer used where a caught value's shape isn't guaranteed
 to be an `Error` (e.g. `notify`'s Kafka consumer catch blocks).
 
-## 9. `middlewares/log.middleware.ts` — request logging
+## 9. `elysia/middlewares/log.middleware.ts` — request logging
 
 **Confirmed.** `logger()` is an Elysia plugin logging one line on request
 start and one on response complete (method, path, status, elapsed ms —
@@ -342,10 +418,12 @@ caller needs the plugin outside the full `createApp()` shell.
 | | `aham` | `notify` |
 |---|---|---|
 | `registry` — connections | postgres (required) | postgres (required); Kafka links owned by notify (§6) |
-| `registry` — http | `notify` (named client) | — |
-| `bootstrap` | `createApp`/`listen`/`boot` | `createApp`/`listen`/`boot` |
+| `registry` — http | `notify` (named client, details only) | — |
+| `registry` — health | `plugin.health` under `/api` | `plugin.health` under `/api` |
+| `elysia` — bootstrap | `createApp`/`listen`/`boot` | `createApp`/`listen`/`boot` |
 | `error` | `createErrorEnum`; `reasonOf` not used | `createErrorEnum`; `reasonOf` (Kafka catch blocks) |
-| `log.middleware` | via `createApp()` only | via `createApp()` only |
+| `elysia` — `middleware.log` | via `createApp()` only | via `createApp()` only |
+| `auth` + `middleware.auth` | `{ key }` source + blocklist `check` | — (no auth) |
 
 Neither consumer imports the bare `@rniverse/shared` barrel — every import
 is a specific subpath (§4). Both are pinned to the same `dist` commit as
@@ -378,11 +456,14 @@ file per single-file module:
 
 ```
 tests/error.test.ts               — createErrorEnum, reasonOf (pure unit)
-tests/log.middleware.test.ts      — logger() Elysia plugin
-tests/bootstrap/create-app.test.ts     — error envelope, context wrap, openapi
-tests/bootstrap/listen.test.ts         — Bun.serve wiring (spied)
-tests/bootstrap/register-shutdown.test.ts — signal/exit paths (spied + a real subprocess)
-tests/bootstrap/boot.test.ts           — the composed import.meta.main body
+tests/health.test.ts                   — signals, cache, single flight, fail event, 503/504
+tests/auth.test.ts                     — createAuth (key + local JWKS server) and the guards
+tests/elysia/health.plugin.test.ts     — the four routes, prefix, details-only guard
+tests/elysia/log.middleware.test.ts    — logger() Elysia plugin
+tests/elysia/bootstrap/create-app.test.ts     — error envelope, context wrap, openapi
+tests/elysia/bootstrap/listen.test.ts         — Bun.serve wiring (spied)
+tests/elysia/bootstrap/register-shutdown.test.ts — signal/exit paths (spied + a real subprocess)
+tests/elysia/bootstrap/boot.test.ts           — the composed import.meta.main body
 tests/registry/connections.test.ts     — connection lifecycle/health/close
 tests/registry/http.test.ts            — named HTTP client map
 ```
