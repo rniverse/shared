@@ -1,10 +1,10 @@
 import { openapi } from '@elysiajs/openapi';
-import { logger } from '../middlewares/log.middleware.js';
 import { log, runWithContext } from '@rniverse/utils';
 import { cxt$req } from '@rniverse/utils/context';
 import { trace$ } from '@rniverse/utils/request';
 import { toJsonSchema } from '@valibot/to-json-schema';
 import Elysia from 'elysia';
+import { logger } from './middlewares/log.middleware.js';
 export function createApp(options) {
     const { api, errors } = options;
     const { AppError } = errors;

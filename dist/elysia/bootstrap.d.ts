@@ -1,5 +1,5 @@
 import Elysia from 'elysia';
-import type { ErrorSpec } from './error.js';
+import type { ErrorSpec } from '../lib/error.js';
 export type CreateAppOptions = {
     api: any;
     /**
