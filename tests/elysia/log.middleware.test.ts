@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, spyOn, test } from 'bun:test';
-import { logger } from '@middlewares/log.middleware';
+import { logger } from '@elysia/middlewares/log.middleware';
 import { cxt$req } from '@rniverse/utils/context';
 import { log } from '@rniverse/utils/logger';
 import Elysia from 'elysia';

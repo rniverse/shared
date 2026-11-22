@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, spyOn, test } from 'bun:test';
-import { listen } from '@lib/bootstrap';
+import { listen } from '@elysia/bootstrap';
 
 describe('listen', () => {
 	afterEach(() => {

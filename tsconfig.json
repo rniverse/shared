@@ -28,7 +28,7 @@
 		"noPropertyAccessFromIndexSignature": false,
 		"paths": {
 			"@lib/*": ["./lib/*"],
-			"@middlewares/*": ["./middlewares/*"]
+			"@elysia/*": ["./elysia/*"]
 		}
 	}
 }

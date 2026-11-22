@@ -1,11 +1,11 @@
 import { openapi } from '@elysiajs/openapi';
-import { logger } from '@middlewares/log.middleware';
 import { log, runWithContext } from '@rniverse/utils';
 import { cxt$req } from '@rniverse/utils/context';
 import { trace$ } from '@rniverse/utils/request';
 import { toJsonSchema } from '@valibot/to-json-schema';
 import Elysia from 'elysia';
-import type { ErrorSpec } from './error';
+import type { ErrorSpec } from '../lib/error';
+import { logger } from './middlewares/log.middleware';
 
 // Generalizes the Elysia app shell every service was hand-rolling
 // identically: onError envelope, openapi docs, and the per-request

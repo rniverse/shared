@@ -13,7 +13,7 @@
 		"sourceMap": true,
 		"removeComments": false
 	},
-	"include": ["index.ts", "lib/**/*.ts", "middlewares/**/*.ts"],
+	"include": ["index.ts", "lib/**/*.ts", "elysia/**/*.ts"],
 	"exclude": ["lib/test", "dist", "node_modules"],
 	"tsc-alias": {
 		"resolveFullPaths": true
